@@ -1,0 +1,11 @@
+SET(GTB_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
+)
+ADD_EXECUTABLE(gtb ${GTB_SOURCES})
+TARGET_LINK_LIBRARIES(gtb glfw)
+TARGET_LINK_LIBRARIES(gtb -Wl,-subsystem,windows)
+
+ADD_CUSTOM_COMMAND(TARGET gtb POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${GLFW_BINARY_DIR}/src/glfw3.dll"
+        "${CMAKE_CURRENT_BINARY_DIR}/glfw3.dll")
