@@ -12,10 +12,24 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-#include "gtb/pch.hpp"
-#include "gtb/application.hpp"
+#pragma once
+namespace gtb {
+    class window {
+        class impl;
+        std::experimental::propagate_const<std::unique_ptr<impl>> m_pimpl;
+    public:
+        window(int w, int h, std::string title,
+            std::function<void()> tick,
+            std::function<void()> draw,
+            std::function<void(int, int)> resize,
+            std::function<void(char)> key_in);
+        ~window();
 
-int main(int argc, char* argv[])
-{
-    return (gtb::application::get()->run(argc, argv));
+        int run();
+    private:
+        window(window&&) = delete;
+        window(const window&) = delete;
+        window& operator=(window&&) = delete;
+        window& operator=(const window&) = delete;
+    };
 }

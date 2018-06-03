@@ -12,10 +12,22 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-#include "gtb/pch.hpp"
-#include "gtb/application.hpp"
+#pragma once
+namespace gtb {
+    class application {
+        class impl;
+        std::experimental::propagate_const<std::unique_ptr<impl>> m_pimpl;
+    public:
+        static application* get();
 
-int main(int argc, char* argv[])
-{
-    return (gtb::application::get()->run(argc, argv));
+        int run(int argc, char* argv[]);
+    private:
+        application();
+        ~application();
+
+        application(application&&) = delete;
+        application(const application&) = delete;
+        application& operator=(application&&) = delete;
+        application& operator=(const application&) = delete;
+    };
 }
