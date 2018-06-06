@@ -14,8 +14,26 @@
 //  limitations under the License.
 #include "gtb/pch.hpp"
 #include "gtb/application.hpp"
+#include "gtb/exception.hpp"
 
 int main(int argc, char* argv[])
 {
-    return (gtb::application::get()->run(argc, argv));
+    int ret_val = EXIT_FAILURE;
+    try {
+        ret_val = gtb::application::get()->run(argc, argv);
+    }
+    catch (const gtb::exception& e) {
+        ret_val = gtb::handle_exception(e);
+    }
+    catch (const boost::exception& e) {
+        ret_val = gtb::handle_exception(e);
+    }
+    catch (const std::exception& e) {
+        ret_val = gtb::handle_exception(e);
+    }
+    catch (...) {
+        ret_val = gtb::handle_exception();
+    }
+
+    return (ret_val);
 }

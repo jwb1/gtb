@@ -14,6 +14,7 @@
 //  limitations under the License.
 #include "gtb/pch.hpp"
 #include "gtb/window.hpp"
+#include "gtb/exception.hpp"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -59,17 +60,20 @@ namespace gtb {
         glfwSetErrorCallback(error_callback);
 
         if (!glfwInit()) {
-            // TODO: throw
+            BOOST_THROW_EXCEPTION(glfw_exception()
+                << boost::errinfo_api_function("glfwInit"));
         }
 
         if (!glfwVulkanSupported()) {
-            // TODO: throw
+            BOOST_THROW_EXCEPTION(glfw_exception()
+                << boost::errinfo_api_function("glfwVulkanSupported"));
         }
 
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         m_window = glfwCreateWindow(w, h, title.c_str(), nullptr, nullptr);
         if (!m_window) {
-            // TODO: throw
+            BOOST_THROW_EXCEPTION(glfw_exception()
+                << boost::errinfo_api_function("glfwCreateWindow"));
         }
 
         glfwSetWindowUserPointer(m_window, this);
@@ -99,15 +103,15 @@ namespace gtb {
     // static
     void window::impl::error_callback(int error, const char* description)
     {
-        /*
-        fprintf(stderr, "Error: %s\n", description);
-        */
+        BOOST_THROW_EXCEPTION(glfw_exception()
+            << errinfo_glfw_error_callback_error(error)
+            << errinfo_glfw_error_callback_description(description));
     }
 
     // static
     void window::impl::key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
     {
-        /*
+        /* TODO
         if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
             glfwSetWindowShouldClose(window, GLFW_TRUE);
         }
