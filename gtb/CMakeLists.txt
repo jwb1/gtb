@@ -2,18 +2,22 @@ SET(BOOST_ROOT $ENV{PACKAGES_ROOT}/Boost)
 SET(Boost_COMPILER "-mgw73") # Boost is built with MinGW GCC
 FIND_PACKAGE(Boost REQUIRED COMPONENTS filesystem)
 
+FIND_PACKAGE(Vulkan REQUIRED)
+
 SET(GTB_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/exception.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/application.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/window.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/graphics.cpp
 )
 ADD_EXECUTABLE(gtb ${GTB_SOURCES})
-TARGET_LINK_LIBRARIES(gtb glfw ${Boost_LIBRARIES})
+TARGET_LINK_LIBRARIES(gtb glfw ${Boost_LIBRARIES} ${Vulkan_LIBRARIES})
 TARGET_LINK_LIBRARIES(gtb -Wl,-subsystem,windows)
 TARGET_INCLUDE_DIRECTORIES(gtb PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${Boost_INCLUDE_DIRS}
+    ${Vulkan_INCLUDE_DIRS}
 )
 
 # Copy all of the required shared libraries next to the newly built binary.

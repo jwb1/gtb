@@ -14,6 +14,8 @@
 //  limitations under the License.
 #pragma once
 namespace gtb {
+    class window;
+    class graphics;
     class application {
         class impl;
         std::experimental::propagate_const<std::unique_ptr<impl>> m_pimpl;
@@ -21,6 +23,9 @@ namespace gtb {
         static application* get();
 
         int run(int argc, char* argv[]);
+
+        window* get_window();
+        graphics* get_graphics();
     private:
         application();
         ~application();

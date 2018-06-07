@@ -13,13 +13,18 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 #pragma once
-// C++ Standard Library
-#include <exception>
-#include <memory>
-#include <functional>
-#include <utility>
-#include <experimental/propagate_const>
-#include <string>
-#include <vector>
-// Boost
-#include <boost/exception/all.hpp>
+namespace gtb {
+    class graphics {
+        class impl;
+        std::experimental::propagate_const<std::unique_ptr<impl>> m_pimpl;
+    public:
+        graphics(std::string application_name, bool enable_debug_layer);
+        ~graphics();
+
+    private:
+        graphics(graphics&&) = delete;
+        graphics(const graphics&) = delete;
+        graphics& operator=(graphics&&) = delete;
+        graphics& operator=(const graphics&) = delete;
+    };
+}

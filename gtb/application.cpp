@@ -15,15 +15,20 @@
 #include "gtb/pch.hpp"
 #include "gtb/application.hpp"
 #include "gtb/window.hpp"
+#include "gtb/graphics.hpp"
 
 namespace gtb {
     class application::impl {
         window m_window;
+        graphics m_graphics;
     public:
         impl();
         ~impl();
 
         int run(int argc, char* argv[]);
+
+        window* get_window() { return (&m_window); }
+        graphics* get_graphics() { return (&m_graphics); }
 
         void tick();
         void draw();
@@ -33,10 +38,18 @@ namespace gtb {
 
     application::impl::impl()
         : m_window(640, 480, "gtb",
-                   std::bind(&impl::tick, this),
-                   std::bind(&impl::draw, this),
-                   std::bind(&impl::resize, this, std::placeholders::_1, std::placeholders::_2),
-                   std::bind(&impl::key_in, this, std::placeholders::_1))
+            std::bind(&impl::tick, this),
+            std::bind(&impl::draw, this),
+            std::bind(&impl::resize, this, std::placeholders::_1, std::placeholders::_2),
+            std::bind(&impl::key_in, this, std::placeholders::_1))
+        , m_graphics(
+            "gtb",
+#if defined(GTB_ENABLE_VULKAN_DEBUG_LAYER)
+            true
+#else
+            false
+#endif
+        )
     {}
     application::impl::~impl() = default;
 
@@ -78,4 +91,7 @@ namespace gtb {
     application::~application() = default;
 
     int application::run(int argc, char* argv[]) { return (m_pimpl->run(argc, argv)); }
+
+    window* application::get_window() { return (m_pimpl->get_window()); }
+    graphics* application::get_graphics() { return (m_pimpl->get_graphics()); }
 }
