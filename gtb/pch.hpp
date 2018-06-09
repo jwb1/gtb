@@ -25,4 +25,5 @@
 // Boost
 #include <boost/exception/all.hpp>
 // Vulkan
+#define VULKAN_HPP_NO_SMART_HANDLE
 #include <vulkan/vulkan.hpp>

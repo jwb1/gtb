@@ -20,6 +20,8 @@
 #include <GLFW/glfw3.h>
 
 namespace gtb {
+    // To initialize vulkan, we first use glfw to dispatch until we can create
+    // the real dispatch loader (right after the device creation.)
     class glfw_dispatch_loader {
     public:
         VkResult vkCreateInstance(const VkInstanceCreateInfo* ci, const VkAllocationCallbacks* a, VkInstance* i) const
@@ -118,10 +120,6 @@ namespace gtb {
                 << errinfo_capability_description("Not all required vulkan instance extensions found."));
         }
 
-        // Now, to start calling vulkan, we first use glfw to dispatch until we can create
-        // the real dispatch loader (right after the device creation.)
-        glfw_dispatch_loader glfw_dispatch;
-
         // Create the vulkan instance.
         vk::ApplicationInfo application_info;
         application_info.pApplicationName = application_name.c_str();
@@ -134,7 +132,7 @@ namespace gtb {
         instance_create_info.enabledExtensionCount = static_cast<uint32_t>(required_extensions.size());
         instance_create_info.ppEnabledExtensionNames = required_extensions.data();
 
-        m_instance = vk::createInstance(instance_create_info, nullptr, glfw_dispatch);
+        m_instance = vk::createInstance(instance_create_info, nullptr, glfw_dispatch_loader());
 
         // Register the debug callback.
         if (enable_debug_layer) {
@@ -143,11 +141,21 @@ namespace gtb {
             debug_report_create_info.pfnCallback = &graphics::impl::debug_report_stub;
             debug_report_create_info.pUserData = this;
 
-            m_debug_report_callback = m_instance.createDebugReportCallbackEXT(debug_report_create_info, nullptr, glfw_dispatch);
+            m_debug_report_callback = m_instance.createDebugReportCallbackEXT(debug_report_create_info, nullptr, glfw_dispatch_loader());
         }
     }
 
-    graphics::impl::~impl() = default;
+    graphics::impl::~impl()
+    {
+        if (m_debug_report_callback) {
+            // assert(m_instance);
+            m_instance.destroyDebugReportCallbackEXT(m_debug_report_callback, nullptr, glfw_dispatch_loader());
+        }
+
+        if (m_instance) {
+            m_instance.destroy(nullptr, glfw_dispatch_loader());
+        }
+    }
 
     // static
     VkBool32 graphics::impl::debug_report_stub(
