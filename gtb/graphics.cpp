@@ -49,11 +49,31 @@ namespace gtb {
                 glfwGetInstanceProcAddress(nullptr, "vkDestroyDebugReportCallbackEXT"));
             destroy_debug_report_callback(i, c, a);
         }
+
+        VkResult vkEnumeratePhysicalDevices(VkInstance i, uint32_t* c, VkPhysicalDevice* pd) const
+        {
+            PFN_vkEnumeratePhysicalDevices enumerate_physical_devices = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
+                glfwGetInstanceProcAddress(nullptr, "vkEnumeratePhysicalDevices"));
+            return (enumerate_physical_devices(i, c, pd));
+        }
+        void vkGetPhysicalDeviceProperties(VkPhysicalDevice pd, VkPhysicalDeviceProperties* p) const
+        {
+            PFN_vkGetPhysicalDeviceProperties get_physical_device_properties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+                glfwGetInstanceProcAddress(nullptr, "vkGetPhysicalDeviceProperties"));
+            get_physical_device_properties(pd, p);
+        }
+        void vkGetPhysicalDeviceFeatures(VkPhysicalDevice pd, VkPhysicalDeviceFeatures* f) const
+        {
+            PFN_vkGetPhysicalDeviceFeatures get_physical_device_features = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures>(
+                glfwGetInstanceProcAddress(nullptr, "vkGetPhysicalDeviceFeatures"));
+            get_physical_device_features(pd, f);
+        }
     };
 
     class graphics::impl {
         vk::Instance m_instance;
         vk::DebugReportCallbackEXT m_debug_report_callback;
+        vk::PhysicalDevice m_physical_device;
     public:
         impl(std::string application_name, bool enable_debug_layer);
         ~impl();
@@ -142,6 +162,24 @@ namespace gtb {
             debug_report_create_info.pUserData = this;
 
             m_debug_report_callback = m_instance.createDebugReportCallbackEXT(debug_report_create_info, nullptr, glfw_dispatch_loader());
+        }
+
+        // Find a physical device to use.
+        std::vector<vk::PhysicalDevice> physical_devices = m_instance.enumeratePhysicalDevices(glfw_dispatch_loader());
+        if (physical_devices.empty()) {
+            BOOST_THROW_EXCEPTION(capability_exception()
+                << errinfo_capability_description("No Vulkan physical devices enumerated."));
+        }
+
+        m_physical_device = physical_devices[0]; // Default to the first physical device in the enumeration.
+        for (vk::PhysicalDevice& device : physical_devices) {
+            vk::PhysicalDeviceProperties device_props = device.getProperties(glfw_dispatch_loader());
+            vk::PhysicalDeviceFeatures device_features = device.getFeatures(glfw_dispatch_loader());
+
+            if (device_props.deviceType == vk::PhysicalDeviceType::eDiscreteGpu) {
+                m_physical_device = device;
+                break;
+            }
         }
     }
 
