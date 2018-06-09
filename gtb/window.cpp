@@ -61,19 +61,19 @@ namespace gtb {
 
         if (!glfwInit()) {
             BOOST_THROW_EXCEPTION(glfw_exception()
-                << boost::errinfo_api_function("glfwInit"));
+                << errinfo_glfw_failed_function("glfwInit"));
         }
 
         if (!glfwVulkanSupported()) {
-            BOOST_THROW_EXCEPTION(glfw_exception()
-                << boost::errinfo_api_function("glfwVulkanSupported"));
+            BOOST_THROW_EXCEPTION(capability_exception()
+                << errinfo_capability_description("Could not find vulkan runtime or driver."));
         }
 
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         m_window = glfwCreateWindow(w, h, title.c_str(), nullptr, nullptr);
         if (!m_window) {
             BOOST_THROW_EXCEPTION(glfw_exception()
-                << boost::errinfo_api_function("glfwCreateWindow"));
+                << errinfo_glfw_failed_function("glfwCreateWindow"));
         }
 
         glfwSetWindowUserPointer(m_window, this);

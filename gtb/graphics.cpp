@@ -16,12 +16,8 @@
 #include "gtb/graphics.hpp"
 #include "gtb/exception.hpp"
 
-#include <vulkan/vulkan.hpp>
-
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
-
-#include <algorithm>
 
 namespace gtb {
     class glfw_dispatch_loader {
@@ -96,7 +92,8 @@ namespace gtb {
             found_layers += std::count(required_layers.begin(), required_layers.end(), layer_name);
         }
         if (found_layers != required_layers.size()) {
-            // !TODO! throw
+            BOOST_THROW_EXCEPTION(capability_exception()
+                << errinfo_capability_description("Not all required vulkan instance layers found."));
         }
 
         // Check for required instance extensions, including the glfw ones.
@@ -117,7 +114,8 @@ namespace gtb {
             found_extensions += std::count(required_extensions.begin(), required_extensions.end(), extension_name);
         }
         if (found_extensions != required_extensions.size()) {
-            // !TODO throw
+            BOOST_THROW_EXCEPTION(capability_exception()
+                << errinfo_capability_description("Not all required vulkan instance extensions found."));
         }
 
         // Now, to start calling vulkan, we first use glfw to dispatch until we can create
@@ -153,14 +151,14 @@ namespace gtb {
 
     // static
     VkBool32 graphics::impl::debug_report_stub(
-            VkDebugReportFlagsEXT flags,
-            VkDebugReportObjectTypeEXT object_type,
-            uint64_t object,
-            size_t location,
-            int32_t message_code,
-            const char* layer_prefix,
-            const char* message,
-            void* user_data)
+        VkDebugReportFlagsEXT flags,
+        VkDebugReportObjectTypeEXT object_type,
+        uint64_t object,
+        size_t location,
+        int32_t message_code,
+        const char* layer_prefix,
+        const char* message,
+        void* user_data)
     {
         graphics::impl* impl = static_cast<graphics::impl*>(user_data);
         impl->debug_report(flags, object_type, object, location, message_code, layer_prefix, message);
@@ -176,7 +174,16 @@ namespace gtb {
         const char* layer_prefix,
         const char* message)
     {
-        // TODO: throw maybe?
+        if (flags & VK_DEBUG_REPORT_ERROR_BIT_EXT) {
+            BOOST_THROW_EXCEPTION(vk_debug_report_error()
+                << errinfo_vk_debug_report_error_object_type(vk::to_string(vk::ObjectType(object_type)).c_str())
+                << errinfo_vk_debug_report_error_object(object)
+                << errinfo_vk_debug_report_error_location(location)
+                << errinfo_vk_debug_report_error_message_code(message_code)
+                << errinfo_vk_debug_report_error_layer_prefix(layer_prefix)
+                << errinfo_vk_debug_report_error_message(message));
+        }
+        // TODO: How to deal with other debug report types?
     }
 
     graphics::graphics(std::string application_name, bool enable_debug_layer)

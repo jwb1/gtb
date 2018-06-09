@@ -18,8 +18,11 @@
 #include <memory>
 #include <functional>
 #include <utility>
+#include <algorithm>
 #include <experimental/propagate_const>
 #include <string>
 #include <vector>
 // Boost
 #include <boost/exception/all.hpp>
+// Vulkan
+#include <vulkan/vulkan.hpp>

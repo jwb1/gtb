@@ -28,6 +28,9 @@ int main(int argc, char* argv[])
     catch (const boost::exception& e) {
         ret_val = gtb::handle_exception(e);
     }
+    catch (const vk::Error& e) {
+        ret_val = gtb::handle_exception(e);
+    }
     catch (const std::exception& e) {
         ret_val = gtb::handle_exception(e);
     }

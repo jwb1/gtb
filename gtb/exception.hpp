@@ -14,14 +14,35 @@
 //  limitations under the License.
 #pragma once
 namespace gtb {
+    // Base class for gtb internal error handling.
+    class exception : public virtual std::exception, public virtual boost::exception {};
+
+    // GLFW function failures or error callbacks throw these.
+    class glfw_exception : public exception {};
+
+    typedef boost::error_info<struct errinfo_glfw_failed_function_, const char*> errinfo_glfw_failed_function;
     typedef boost::error_info<struct errinfo_glfw_error_callback_error_, int> errinfo_glfw_error_callback_error;
     typedef boost::error_info<struct errinfo_glfw_error_callback_description_, const char*> errinfo_glfw_error_callback_description;
 
-    class exception : public virtual std::exception, public virtual boost::exception {};
-    class glfw_exception : public exception {};
+    // System capability failures throw these.
+    class capability_exception : public exception {};
 
-    int handle_exception(gtb::exception const& e);
-    int handle_exception(boost::exception const& e);
-    int handle_exception(std::exception const& e);
+    typedef boost::error_info<struct errinfo_capability_description_, const char*> errinfo_capability_description;
+
+    // Vulkan debug reports with the error bit set throw these.
+    class vk_debug_report_error : public exception {};
+
+    typedef boost::error_info<struct errinfo_vk_debug_report_error_object_type_, const char*> errinfo_vk_debug_report_error_object_type;
+    typedef boost::error_info<struct errinfo_vk_debug_report_error_object_, uint64_t> errinfo_vk_debug_report_error_object;
+    typedef boost::error_info<struct errinfo_vk_debug_report_error_location_, size_t> errinfo_vk_debug_report_error_location;
+    typedef boost::error_info<struct errinfo_vk_debug_report_error_message_code_, int32_t> errinfo_vk_debug_report_error_message_code;
+    typedef boost::error_info<struct errinfo_vk_debug_report_error_layer_prefix_, const char*> errinfo_vk_debug_report_error_layer_prefix;
+    typedef boost::error_info<struct errinfo_vk_debug_report_error_message_, const char*> errinfo_vk_debug_report_error_message;
+
+    // Exception handlers; only intended to be called in catch blocks!
+    int handle_exception(const gtb::exception& e);
+    int handle_exception(const boost::exception& e);
+    int handle_exception(const vk::Error& e);
+    int handle_exception(const std::exception& e);
     int handle_exception();
 }

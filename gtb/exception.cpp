@@ -29,7 +29,7 @@ namespace gtb {
         log_stream.open(log_file_path.string(), std::ios_base::out | std::ios_base::trunc);
     }
 
-    int handle_exception(gtb::exception const& e)
+    int handle_exception(const gtb::exception& e)
     {
         std::ofstream log_stream;
         gtb::open_exception_log_stream(log_stream);
@@ -43,7 +43,7 @@ namespace gtb {
         return (EXIT_FAILURE);
     }
 
-    int handle_exception(boost::exception const& e)
+    int handle_exception(const boost::exception& e)
     {
         std::ofstream log_stream;
         gtb::open_exception_log_stream(log_stream);
@@ -57,7 +57,21 @@ namespace gtb {
         return (EXIT_FAILURE);
     }
 
-    int handle_exception(std::exception const& e)
+    int handle_exception(const vk::Error& e)
+    {
+        std::ofstream log_stream;
+        gtb::open_exception_log_stream(log_stream);
+        if (log_stream.is_open()) {
+            log_stream
+                << "Exception caught!" << std::endl
+                << "Type: vk::Error" << std::endl
+                << "What: " << e.what() << std::endl;
+            log_stream.close();
+        }
+        return (EXIT_FAILURE);
+    }
+
+    int handle_exception(const std::exception& e)
     {
         std::ofstream log_stream;
         gtb::open_exception_log_stream(log_stream);
