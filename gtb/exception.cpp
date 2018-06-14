@@ -24,8 +24,9 @@ namespace gtb {
     {
         boost::filesystem::path log_file_path(std::getenv("LOCALAPPDATA"));
         log_file_path /= "gtb";
-        log_file_path /= "exception.log";
+        boost::filesystem::create_directories(log_file_path);
 
+        log_file_path /= "exception.log";
         log_stream.open(log_file_path.string(), std::ios_base::out | std::ios_base::trunc);
     }
 

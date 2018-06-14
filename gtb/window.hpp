@@ -21,11 +21,12 @@ namespace gtb {
         window(int w, int h, std::string title,
             std::function<void()> tick,
             std::function<void()> draw,
-            std::function<void(int, int)> resize,
             std::function<void(char)> key_in);
         ~window();
 
         int run();
+
+        vk::SurfaceKHR create_vk_surface(vk::Instance instance) const;
     private:
         window(window&&) = delete;
         window(const window&) = delete;

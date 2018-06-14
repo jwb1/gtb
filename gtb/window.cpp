@@ -24,7 +24,6 @@ namespace gtb {
         // Callbacks
         std::function<void()> m_tick;
         std::function<void()> m_draw;
-        std::function<void(int, int)> m_resize;
         std::function<void(char)> m_key_in;
         // GLFW
         GLFWwindow* m_window;
@@ -32,28 +31,25 @@ namespace gtb {
         impl(int w, int h, std::string title,
             std::function<void()> tick,
             std::function<void()> draw,
-            std::function<void(int, int)> resize,
             std::function<void(char)> key_in);
         ~impl();
 
         int run();
 
+        vk::SurfaceKHR create_vk_surface(vk::Instance instance) const;
     private:
         // GLFW uses C-style callbacks
         static void error_callback(int error, const char* description);
         static void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods);
         static void refresh_callback(GLFWwindow* window);
-        static void resize_callback(GLFWwindow* window, int width, int height);
     };
 
     window::impl::impl(int w, int h, std::string title,
         std::function<void()> tick,
         std::function<void()> draw,
-        std::function<void(int, int)> resize,
         std::function<void(char)> key_in)
         : m_tick(std::move(tick))
         , m_draw(std::move(draw))
-        , m_resize(std::move(resize))
         , m_key_in(std::move(key_in))
         , m_window(nullptr)
     {
@@ -70,6 +66,7 @@ namespace gtb {
         }
 
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
         m_window = glfwCreateWindow(w, h, title.c_str(), nullptr, nullptr);
         if (!m_window) {
             BOOST_THROW_EXCEPTION(glfw_exception()
@@ -78,7 +75,6 @@ namespace gtb {
 
         glfwSetWindowUserPointer(m_window, this);
         glfwSetWindowRefreshCallback(m_window, refresh_callback);
-        glfwSetFramebufferSizeCallback(m_window, resize_callback);
         glfwSetKeyCallback(m_window, key_callback);
     }
 
@@ -98,6 +94,16 @@ namespace gtb {
             m_draw();
         }
         return (EXIT_SUCCESS);
+    }
+
+    vk::SurfaceKHR window::impl::create_vk_surface(vk::Instance instance) const
+    {
+        VkSurfaceKHR surface; // Create C++ wrapper on way out of this function.
+        if (glfwCreateWindowSurface(instance, m_window, nullptr, &surface) != VK_SUCCESS) {
+            BOOST_THROW_EXCEPTION(glfw_exception()
+                << errinfo_glfw_failed_function("glfwCreateWindowSurface"));
+        }
+        return (surface);
     }
 
     // static
@@ -125,21 +131,14 @@ namespace gtb {
         pimpl->m_draw();
     }
 
-    // static
-    void window::impl::resize_callback(GLFWwindow* window, int width, int height)
-    {
-        window::impl* pimpl = static_cast<window::impl*>(glfwGetWindowUserPointer(window));
-        pimpl->m_resize(width, height);
-    }
-
     window::window(int w, int h, std::string title,
         std::function<void()> tick,
         std::function<void()> draw,
-        std::function<void(int, int)> resize,
         std::function<void(char)> key_in)
-        : m_pimpl(std::make_unique<impl>(w, h, title, tick, draw, resize, key_in))
+        : m_pimpl(std::make_unique<impl>(w, h, title, tick, draw, key_in))
     {}
     window::~window() = default;
 
     int window::run() { return (m_pimpl->run()); }
+    vk::SurfaceKHR window::create_vk_surface(vk::Instance instance) const { return (m_pimpl->create_vk_surface(instance)); }
 }

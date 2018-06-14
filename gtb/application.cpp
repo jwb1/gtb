@@ -32,23 +32,22 @@ namespace gtb {
 
         void tick();
         void draw();
-        void resize(int w, int h);
         void key_in(char c);
     };
 
     application::impl::impl()
-        : m_window(640, 480, "gtb",
+        : m_window(1024, 768, "gtb",
             std::bind(&impl::tick, this),
             std::bind(&impl::draw, this),
-            std::bind(&impl::resize, this, std::placeholders::_1, std::placeholders::_2),
             std::bind(&impl::key_in, this, std::placeholders::_1))
         , m_graphics(
             "gtb",
 #if defined(GTB_ENABLE_VULKAN_DEBUG_LAYER)
-            true
+            true,
 #else
-            false
+            false,
 #endif
+            &m_window
         )
     {}
     application::impl::~impl() = default;
@@ -64,11 +63,6 @@ namespace gtb {
     }
 
     void application::impl::draw()
-    {
-
-    }
-
-    void application::impl::resize(int w, int h)
     {
 
     }

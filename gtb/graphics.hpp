@@ -14,11 +14,12 @@
 //  limitations under the License.
 #pragma once
 namespace gtb {
+    class window;
     class graphics {
         class impl;
         std::experimental::propagate_const<std::unique_ptr<impl>> m_pimpl;
     public:
-        graphics(std::string application_name, bool enable_debug_layer);
+        graphics(std::string application_name, bool enable_debug_layer, window* w);
         ~graphics();
 
     private:
