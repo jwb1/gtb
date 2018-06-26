@@ -16,8 +16,6 @@
 // C++ Standard Library
 #include <cstdlib>
 #include <exception>
-//#include <memory>
-//#include <utility>
 #include <algorithm>
 #include <string>
 #include <vector>
@@ -64,6 +62,11 @@ namespace gtb {
         typedef boost::error_info<struct errinfo_vk_debug_report_error_message_code_, int32_t> errinfo_vk_debug_report_error_message_code;
         typedef boost::error_info<struct errinfo_vk_debug_report_error_layer_prefix_, const char*> errinfo_vk_debug_report_error_layer_prefix;
         typedef boost::error_info<struct errinfo_vk_debug_report_error_message_, const char*> errinfo_vk_debug_report_error_message;
+
+        // File i/o failures throw these.
+        class file_exception : public exception {};
+
+        typedef boost::error_info<struct errinfo_file_exception_file_, const char*> errinfo_file_exception_file;
 
         // Exception handlers; only intended to be called in catch blocks!
         void open_exception_log_stream(std::ofstream& log_stream)
@@ -158,7 +161,15 @@ namespace gtb {
         vk::Queue m_queue;
         vk::DispatchLoaderDynamic m_dispatch;
         vk::SurfaceKHR m_surface;
+        vk::Format m_swap_chain_format;
+        vk::Extent2D m_swap_chain_extent;
         vk::SwapchainKHR m_swap_chain;
+        std::vector<vk::Image> m_swap_chain_images;
+        std::vector<vk::ImageView> m_swap_chain_views;
+
+        // Shaders
+        vk::ShaderModule m_simple_vert;
+        vk::ShaderModule m_simple_frag;
     public:
         static application* get();
 
@@ -204,6 +215,10 @@ namespace gtb {
             const char* message,
             void* user_data);
 
+        // Shaders
+        void shaders_init();
+        void shaders_cleanup();
+
         // Disallow some C++ operations.
         application(application&&) = delete;
         application(const application&) = delete;
@@ -223,9 +238,11 @@ namespace gtb {
     {
         glfw_init();
         vk_init();
+        shaders_init();
     }
     application::~application()
     {
+        shaders_cleanup();
         vk_cleanup();
         glfw_cleanup();
     }
@@ -294,6 +311,10 @@ namespace gtb {
 
     void application::vk_cleanup()
     {
+        for (vk::ImageView &view : m_swap_chain_views) {
+            m_device.destroyImageView(view, nullptr, m_dispatch);
+        }
+
         if (m_swap_chain) {
             m_device.destroySwapchainKHR(m_swap_chain, nullptr, m_dispatch);
         }
@@ -458,6 +479,7 @@ namespace gtb {
             if (!found_surface_format) {
                 continue;
             }
+            m_swap_chain_format = vk::Format::eB8G8R8A8Unorm;
 
             // Looking for mailbox presentation for triple buffering.
             present_modes = physical_device.getSurfacePresentModesKHR(m_surface, d);
@@ -516,7 +538,7 @@ namespace gtb {
         m_dispatch.init(m_instance, m_device);
 
         // Get all of the queues in the family.
-        m_queue = m_device.getQueue(queue_family_index, 0, m_dispath);
+        m_queue = m_device.getQueue(queue_family_index, 0, m_dispatch);
     }
 
     void application::vk_create_swap_chain()
@@ -524,13 +546,15 @@ namespace gtb {
         // This call still has to be dispatched by instance only. So no dynamic dispatch.
         glfw_dispatch_loader d(m_instance);
         vk::SurfaceCapabilitiesKHR surface_capabilities = m_physical_device.getSurfaceCapabilitiesKHR(m_surface, d);
+        m_swap_chain_extent = surface_capabilities.currentExtent;
 
+        // Create the whole swap chain.
         vk::SwapchainCreateInfoKHR swap_chain_create_info;
         swap_chain_create_info.surface = m_surface;
         swap_chain_create_info.minImageCount = 3;
-        swap_chain_create_info.imageFormat = vk::Format::eB8G8R8A8Unorm;
+        swap_chain_create_info.imageFormat = m_swap_chain_format;
         swap_chain_create_info.imageColorSpace = vk::ColorSpaceKHR::eSrgbNonlinear;
-        swap_chain_create_info.imageExtent = surface_capabilities.currentExtent;
+        swap_chain_create_info.imageExtent = m_swap_chain_extent;
         swap_chain_create_info.imageArrayLayers = 1;
         swap_chain_create_info.imageUsage = vk::ImageUsageFlagBits::eColorAttachment;
         swap_chain_create_info.imageSharingMode = vk::SharingMode::eExclusive;
@@ -539,6 +563,75 @@ namespace gtb {
         swap_chain_create_info.clipped = VK_TRUE;
 
         m_swap_chain = m_device.createSwapchainKHR(swap_chain_create_info, nullptr, m_dispatch);
+
+        // Get the images from the swap chain and create views to each.
+        m_swap_chain_images = m_device.getSwapchainImagesKHR(m_swap_chain, m_dispatch);
+
+        vk::ImageViewCreateInfo image_view_create_info;
+        image_view_create_info.viewType = vk::ImageViewType::e2D;
+        image_view_create_info.format = m_swap_chain_format;
+        image_view_create_info.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
+        image_view_create_info.subresourceRange.levelCount = 1;
+        image_view_create_info.subresourceRange.layerCount = 1;
+
+        m_swap_chain_views.reserve(m_swap_chain_images.size());
+        for (vk::Image &image : m_swap_chain_images) {
+            image_view_create_info.image = image;
+            m_swap_chain_views.emplace_back(m_device.createImageView(image_view_create_info, nullptr, m_dispatch));
+        }
+    }
+
+    void application::shaders_init()
+    {
+        std::ifstream spirv_stream;
+        std::vector<char> spirv_buffer;
+        vk::ShaderModuleCreateInfo shader_module_create_info;
+
+        struct shader_to_init {
+            std::string file_name;
+            vk::ShaderModule& module;
+        } init_list[] = {
+            { "simple.vert.spv", m_simple_vert },
+            { "simple.frag.spv", m_simple_frag }
+        };
+
+        for (shader_to_init& init_this : init_list) {
+            spirv_stream.open(init_this.file_name, std::ios::ate | std::ios::binary);
+
+            if (!spirv_stream.is_open()) {
+                BOOST_THROW_EXCEPTION(error::file_exception()
+                    << error::errinfo_file_exception_file(init_this.file_name.c_str()));
+            }
+
+            size_t spirv_stream_size = spirv_stream.tellg();
+            if (spirv_stream_size == size_t(-1)) {
+                BOOST_THROW_EXCEPTION(error::file_exception()
+                    << error::errinfo_file_exception_file(init_this.file_name.c_str()));
+            }
+
+            spirv_buffer.reserve(spirv_stream_size);
+            spirv_stream.seekg(0);
+            spirv_stream.read(spirv_buffer.data(), spirv_stream_size);
+
+            shader_module_create_info.codeSize = spirv_stream_size;
+            shader_module_create_info.pCode = reinterpret_cast<const uint32_t*>(spirv_buffer.data());
+
+            init_this.module = m_device.createShaderModule(shader_module_create_info, nullptr, m_dispatch);
+
+            spirv_stream.close();
+            spirv_buffer.clear();
+        }
+    }
+
+    void application::shaders_cleanup()
+    {
+        if (m_simple_frag) {
+            m_device.destroyShaderModule(m_simple_frag, nullptr, m_dispatch);
+        }
+
+        if (m_simple_vert) {
+            m_device.destroyShaderModule(m_simple_vert, nullptr, m_dispatch);
+        }
     }
 
     int application::run(int, char*[])
