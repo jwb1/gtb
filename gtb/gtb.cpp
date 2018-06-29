@@ -170,6 +170,10 @@ namespace gtb {
         // Shaders
         vk::ShaderModule m_simple_vert;
         vk::ShaderModule m_simple_frag;
+
+        // Render pass and targets
+        vk::RenderPass m_simple_render_pass;
+        std::vector<vk::Framebuffer> m_simple_framebuffers;
     public:
         static application* get();
 
@@ -219,6 +223,10 @@ namespace gtb {
         void shaders_init();
         void shaders_cleanup();
 
+        // Render pass and targets
+        void render_pass_init();
+        void render_pass_cleanup();
+
         // Disallow some C++ operations.
         application(application&&) = delete;
         application(const application&) = delete;
@@ -239,9 +247,12 @@ namespace gtb {
         glfw_init();
         vk_init();
         shaders_init();
+        render_pass_init();
     }
+
     application::~application()
     {
+        render_pass_init();
         shaders_cleanup();
         vk_cleanup();
         glfw_cleanup();
@@ -347,8 +358,9 @@ namespace gtb {
         // Check for required instance layers.
         std::vector<vk::LayerProperties> supported_layers(vk::enumerateInstanceLayerProperties(d));
         size_t found_layers = 0;
+        std::string layer_name;
         for (vk::LayerProperties& layer : supported_layers) {
-            std::string layer_name(layer.layerName);
+            layer_name = layer.layerName;
             found_layers += std::count(required_layers.begin(), required_layers.end(), layer_name);
         }
         if (found_layers != required_layers.size()) {
@@ -359,8 +371,9 @@ namespace gtb {
         // Check for required instance extensions.
         std::vector<vk::ExtensionProperties> supported_extensions(vk::enumerateInstanceExtensionProperties(nullptr, d));
         size_t found_extensions = 0;
+        std::string extension_name;
         for (vk::ExtensionProperties& extension : supported_extensions) {
-            std::string extension_name(extension.extensionName);
+            extension_name = extension.extensionName;
             found_extensions += std::count(required_extensions.begin(), required_extensions.end(), extension_name);
         }
         if (found_extensions != required_extensions.size()) {
@@ -634,11 +647,67 @@ namespace gtb {
         }
     }
 
+    void application::render_pass_init()
+    {
+        // Need a render pass setup for each rendering method.
+        vk::AttachmentDescription color_attachment;
+        color_attachment.format = m_swap_chain_format;
+        color_attachment.samples = vk::SampleCountFlagBits::e1;
+        color_attachment.loadOp = vk::AttachmentLoadOp::eClear;
+        color_attachment.storeOp = vk::AttachmentStoreOp::eStore;
+        color_attachment.stencilLoadOp = vk::AttachmentLoadOp::eDontCare;
+        color_attachment.stencilStoreOp = vk::AttachmentStoreOp::eDontCare;
+        color_attachment.initialLayout = vk::ImageLayout::eUndefined;
+        color_attachment.finalLayout = vk::ImageLayout::ePresentSrcKHR;
+
+        vk::AttachmentReference color_reference;
+        color_reference.attachment = 0;
+        color_reference.layout = vk::ImageLayout::eColorAttachmentOptimal;
+
+        vk::SubpassDescription simple_subpass;
+        simple_subpass.pipelineBindPoint = vk::PipelineBindPoint::eGraphics;
+        simple_subpass.colorAttachmentCount = 1;
+        simple_subpass.pColorAttachments = &color_reference;
+
+        vk::RenderPassCreateInfo render_pass_create_info;
+        render_pass_create_info.attachmentCount = 1;
+        render_pass_create_info.pAttachments = &color_attachment;
+        render_pass_create_info.subpassCount = 1;
+        render_pass_create_info.pSubpasses = &simple_subpass;
+
+        m_simple_render_pass = m_device.createRenderPass(render_pass_create_info, nullptr, m_dispatch);
+
+        // Each render pass needs it's own set of frame buffers for the swap chain.
+        m_simple_framebuffers.reserve(m_swap_chain_views.size());
+        for (vk::ImageView& image_view : m_swap_chain_views) {
+            vk::FramebufferCreateInfo frame_buffer_create_info;
+            frame_buffer_create_info.renderPass = m_simple_render_pass;
+            frame_buffer_create_info.attachmentCount = 1;
+            frame_buffer_create_info.pAttachments = &image_view;
+            frame_buffer_create_info.width = m_swap_chain_extent.width;
+            frame_buffer_create_info.height = m_swap_chain_extent.height;
+            frame_buffer_create_info.layers = 1;
+
+            m_simple_framebuffers.emplace_back(m_device.createFramebuffer(frame_buffer_create_info, nullptr, m_dispatch));
+        }
+    }
+
+    void application::render_pass_cleanup()
+    {
+        for (vk::Framebuffer& frame_buffer : m_simple_framebuffers) {
+            m_device.destroyFramebuffer(frame_buffer, nullptr, m_dispatch);
+        }
+
+        if (m_simple_render_pass) {
+            m_device.destroyRenderPass(m_simple_render_pass, nullptr, m_dispatch);
+        }
+    }
+
     int application::run(int, char*[])
     {
         while (!glfwWindowShouldClose(m_window)) {
-            tick();
             glfwPollEvents();
+            tick();
             draw();
         }
         return (EXIT_SUCCESS);
