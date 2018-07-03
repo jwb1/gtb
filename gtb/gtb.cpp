@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <limits>
 
 // Boost
 #include <boost/exception/all.hpp>
@@ -157,6 +158,7 @@ namespace gtb {
         vk::Instance m_instance;
         vk::DebugReportCallbackEXT m_debug_report_callback;
         vk::PhysicalDevice m_physical_device;
+        uint32_t m_queue_family_index;
         vk::Device m_device;
         vk::Queue m_queue;
         vk::DispatchLoaderDynamic m_dispatch;
@@ -166,6 +168,7 @@ namespace gtb {
         vk::SwapchainKHR m_swap_chain;
         std::vector<vk::Image> m_swap_chain_images;
         std::vector<vk::ImageView> m_swap_chain_views;
+        vk::Fence m_image_ready;
 
         // Shaders
         vk::ShaderModule m_simple_vert;
@@ -174,6 +177,18 @@ namespace gtb {
         // Render pass and targets
         vk::RenderPass m_simple_render_pass;
         std::vector<vk::Framebuffer> m_simple_framebuffers;
+
+        // Pipelines
+        vk::PipelineLayout m_simple_pipeline_layout;
+
+        // Command buffers (normally per-rendering thread)
+        vk::CommandPool m_command_pool;
+        std::vector<vk::CommandBuffer> m_command_buffers;
+        std::vector<vk::Fence> m_command_fences;
+
+        // Frame tracking
+        uint32_t m_frame_number;
+
     public:
         static application* get();
 
@@ -227,6 +242,14 @@ namespace gtb {
         void render_pass_init();
         void render_pass_cleanup();
 
+        // Pipelines
+        void pipeline_init();
+        void pipeline_cleanup();
+
+        // Command buffers
+        void command_buffer_init();
+        void command_buffer_cleanup();
+
         // Disallow some C++ operations.
         application(application&&) = delete;
         application(const application&) = delete;
@@ -243,16 +266,22 @@ namespace gtb {
 
     application::application()
         : m_window(nullptr)
+        , m_queue_family_index(std::numeric_limits<uint32_t>::max())
+        , m_frame_number(0)
     {
         glfw_init();
         vk_init();
         shaders_init();
         render_pass_init();
+        pipeline_init();
+        command_buffer_init();
     }
 
     application::~application()
     {
-        render_pass_init();
+        command_buffer_cleanup();
+        pipeline_cleanup();
+        render_pass_cleanup();
         shaders_cleanup();
         vk_cleanup();
         glfw_cleanup();
@@ -322,6 +351,10 @@ namespace gtb {
 
     void application::vk_cleanup()
     {
+        if (m_image_ready) {
+            m_device.destroyFence(m_image_ready, nullptr, m_dispatch);
+        }
+
         for (vk::ImageView &view : m_swap_chain_views) {
             m_device.destroyImageView(view, nullptr, m_dispatch);
         }
@@ -524,6 +557,7 @@ namespace gtb {
 
         if (found_physical_device) {
             m_physical_device = found_physical_device;
+            m_queue_family_index = queue_family_index;
         }
         else {
             BOOST_THROW_EXCEPTION(error::capability_exception()
@@ -533,7 +567,7 @@ namespace gtb {
         // Create the device.
         float queue_priority = 1.0f; // Priority is not important when there is only a single queue.
         vk::DeviceQueueCreateInfo queue_create_info;
-        queue_create_info.queueFamilyIndex = queue_family_index;
+        queue_create_info.queueFamilyIndex = m_queue_family_index;
         queue_create_info.queueCount = 1;
         queue_create_info.pQueuePriorities = &queue_priority;
 
@@ -551,7 +585,7 @@ namespace gtb {
         m_dispatch.init(m_instance, m_device);
 
         // Get all of the queues in the family.
-        m_queue = m_device.getQueue(queue_family_index, 0, m_dispatch);
+        m_queue = m_device.getQueue(m_queue_family_index, 0, m_dispatch);
     }
 
     void application::vk_create_swap_chain()
@@ -592,6 +626,11 @@ namespace gtb {
             image_view_create_info.image = image;
             m_swap_chain_views.emplace_back(m_device.createImageView(image_view_create_info, nullptr, m_dispatch));
         }
+
+        // Need a fence to use when acquiring a texture from the swap chain.
+        vk::FenceCreateInfo fence_create_info;
+        fence_create_info.flags = vk::FenceCreateFlagBits::eSignaled;
+        m_image_ready = m_device.createFence(fence_create_info, nullptr, m_dispatch);
     }
 
     void application::shaders_init()
@@ -703,6 +742,57 @@ namespace gtb {
         }
     }
 
+    void application::pipeline_init()
+    {
+        // Create pipelines for each rendering method.
+        vk::PipelineVertexInputStateCreateInfo vertex_input_create_info;
+        vertex_input_create_info.vertexBindingDescriptionCount = 0;
+        vertex_input_create_info.pVertexBindingDescriptions = nullptr;
+        vertex_input_create_info.vertexAttributeDescriptionCount = 0;
+        vertex_input_create_info.pVertexAttributeDescriptions = nullptr;
+    }
+    
+    void application::pipeline_cleanup()
+    {
+
+    }
+
+    void application::command_buffer_init()
+    {
+        // Command pool is the allocator wrapper.
+        vk::CommandPoolCreateInfo command_pool_create_info;
+        command_pool_create_info.flags = vk::CommandPoolCreateFlagBits::eTransient | vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
+        command_pool_create_info.queueFamilyIndex = m_queue_family_index;
+
+        m_command_pool = m_device.createCommandPool(command_pool_create_info, nullptr, m_dispatch);
+
+        // Need a command buffer per frame in flight.
+        size_t frames_in_flight = m_swap_chain_views.size();
+
+        vk::CommandBufferAllocateInfo command_buffer_allocate_info;
+        command_buffer_allocate_info.commandPool = m_command_pool;
+        command_buffer_allocate_info.level = vk::CommandBufferLevel::ePrimary;
+        command_buffer_allocate_info.commandBufferCount = frames_in_flight;
+
+        m_command_buffers = m_device.allocateCommandBuffers(command_buffer_allocate_info, m_dispatch);
+
+        // Need a fence per command
+        vk::FenceCreateInfo fence_create_info;
+        fence_create_info.flags = vk::FenceCreateFlagBits::eSignaled;
+
+        m_command_fences.reserve(frames_in_flight);
+        for (size_t i = 0; i < frames_in_flight; ++i) {
+            m_command_fences.emplace_back(m_device.createFence(fence_create_info, nullptr, m_dispatch));
+        }
+    }
+
+    void application::command_buffer_cleanup()
+    {
+        if (m_command_pool) {
+            m_device.destroyCommandPool(m_command_pool, nullptr, m_dispatch);
+        }
+    }
+
     int application::run(int, char*[])
     {
         while (!glfwWindowShouldClose(m_window)) {
@@ -720,7 +810,61 @@ namespace gtb {
 
     void application::draw()
     {
+        if (++m_frame_number == 3) {
+            m_frame_number = 0;
+        }
 
+        vk::CommandBuffer& command_buffer(m_command_buffers[m_frame_number]);
+        vk::Fence& command_fence(m_command_fences[m_frame_number]);
+
+        constexpr uint64_t infinite_wait = std::numeric_limits<uint64_t>::max();
+
+        // Wait for the commands complete fence in order to record.
+        m_device.waitForFences(command_fence, VK_FALSE, infinite_wait, m_dispatch);
+
+        // Now we can reset and record a new command buffer for this frame.
+        command_buffer.reset(vk::CommandBufferResetFlags(), m_dispatch);
+
+        vk::CommandBufferBeginInfo begin_info;
+        begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+        command_buffer.begin(begin_info, m_dispatch);
+
+        vk::ClearValue clear_to_black;
+        clear_to_black.color.setFloat32( {{0.0f, 0.0f, 0.0f, 1.0f}} );
+
+        vk::RenderPassBeginInfo pass_begin_info;
+        pass_begin_info.renderPass = m_simple_render_pass;
+        pass_begin_info.framebuffer = m_simple_framebuffers[m_frame_number];
+        pass_begin_info.renderArea.offset = vk::Offset2D(0, 0);
+        pass_begin_info.renderArea.extent = m_swap_chain_extent;
+        pass_begin_info.clearValueCount = 1;
+        pass_begin_info.pClearValues = &clear_to_black;
+        command_buffer.beginRenderPass(pass_begin_info, vk::SubpassContents::eInline, m_dispatch);
+
+        // TODO: draw
+
+        command_buffer.endRenderPass(m_dispatch);
+        command_buffer.end(m_dispatch);
+
+        m_device.resetFences({m_image_ready, command_fence}, m_dispatch);
+
+        // Get the next image to render to from the swap chain, once it's off-screen.
+        uint32_t aquired_image = m_device.acquireNextImageKHR(m_swap_chain, infinite_wait, vk::Semaphore(), m_image_ready, m_dispatch).value;
+        // TODO: Deal with suboptimal or out-of-date swapchains
+        m_device.waitForFences(m_image_ready, VK_FALSE, infinite_wait, m_dispatch);
+
+        // Submit work
+        vk::SubmitInfo submit_info;
+        submit_info.commandBufferCount = 1;
+        submit_info.pCommandBuffers = &command_buffer;
+        m_queue.submit(submit_info, command_fence, m_dispatch);
+
+        // Present the texture
+        vk::PresentInfoKHR present_info;
+        present_info.swapchainCount = 1;
+        present_info.pSwapchains = &m_swap_chain;
+        present_info.pImageIndices = &aquired_image;
+        m_queue.presentKHR(present_info, m_dispatch);
     }
 
     // static
