@@ -14,7 +14,10 @@
 //  limitations under the License.
 
 // C++ Standard Library
+#define _CRT_SECURE_NO_WARNINGS
 #include <cstdlib>
+#include <cmath>
+#include <cfenv>
 #include <exception>
 #include <algorithm>
 #include <string>
@@ -34,10 +37,63 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
+// GLM
+#if defined(_MSC_VER)
+#pragma warning (push)
+#pragma warning (disable : 4201) // warning C4201 : nonstandard extension used : nameless struct / union
+#endif
+#define GLM_FORCE_SWIZZLE
+#define GLM_FORCE_AVX
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE
+#define GLM_FORCE_RADIANS
+#include <glm/glm.hpp>
+#if defined(_MSC_VER)
+#pragma warning (pop)
+#endif
+
 // Local helper classes
 #include "gtb/glfw_dispatch_loader.hpp"
 
+/*
+~~ Math Conventions ~~
+- Right handed coordinate space to match OpenGL conventions
+- Counter-clockwise winding as front facing
+- Vectors are treated as column vectors
+- Matrices are stored column major; eg m[col][row] aka m[col] returns a column
+|m00 m10 m20 m30|         |m0 m4 m8  m12|
+|m01 m11 m21 m31|         |m1 m5 m9  m13|
+|m02 m12 m22 m32|         |m2 m6 m10 m14|
+|m03 m13 m23 m33|         |m3 m7 m11 m15|
+- A column vector is multiplied by a matrix on the right:
+|m00 m10 m20 m30| |v0|   |(m00 * v0) + (m10 * v1) + (m20 * v2) + (m30 * v3)|
+|m01 m11 m21 m31| |v1| = |(m01 * v0) + (m11 * v1) + (m21 * v2) + (m31 * v3)|
+|m02 m12 m22 m32| |v2|   |(m02 * v0) + (m12 * v1) + (m22 * v2) + (m32 * v3)|
+|m03 m13 m23 m33| |v3|   |(m03 * v0) + (m13 * v1) + (m23 * v2) + (m33 * v3)|
+
+- Transformations on the right of a matrix product applied are first geometrically;
+If T, S, and R and transformations, then the product M = T * S * R will apply
+R first, then S, the T, geometrically.
+- Translation lives in column 3 (m12, m13, m14) when transforming homogeneous vectors
+
+- Eye space places the camera at (0, 0, 0), looking in the direction of the -Z axis,
+which is the standard for OpenGL.
+- Clip space dimensions [[-1, 1], [-1, 1], [0,1]], where geometry with (x,y)
+normalized device coordinates of (-1,-1) correspond to the lower-left corner of the
+viewport and the near and far planes correspond to z normalized device coordinates
+of 0 and +1, respectively.
+*/
+
 namespace gtb {
+    void open_log_stream(std::ofstream& log_stream, const std::string& file_name)
+    {
+        boost::filesystem::path log_file_path(std::getenv("LOCALAPPDATA"));
+        log_file_path /= "gtb";
+        boost::filesystem::create_directories(log_file_path);
+
+        log_file_path /= file_name;
+        log_stream.open(log_file_path.string(), std::ios_base::out | std::ios_base::trunc);
+    }
+
     namespace error {
         // Base class for gtb internal error handling.
         class exception : public virtual std::exception, public virtual boost::exception {};
@@ -70,20 +126,10 @@ namespace gtb {
         typedef boost::error_info<struct errinfo_file_exception_file_, const char*> errinfo_file_exception_file;
 
         // Exception handlers; only intended to be called in catch blocks!
-        void open_exception_log_stream(std::ofstream& log_stream)
-        {
-            boost::filesystem::path log_file_path(std::getenv("LOCALAPPDATA"));
-            log_file_path /= "gtb";
-            boost::filesystem::create_directories(log_file_path);
-
-            log_file_path /= "exception.log";
-            log_stream.open(log_file_path.string(), std::ios_base::out | std::ios_base::trunc);
-        }
-
         int handle_exception(const gtb::error::exception& e)
         {
             std::ofstream log_stream;
-            open_exception_log_stream(log_stream);
+            open_log_stream(log_stream, "exception.log");
             if (log_stream.is_open()) {
                 log_stream
                     << "Exception caught!" << std::endl
@@ -97,7 +143,7 @@ namespace gtb {
         int handle_exception(const boost::exception& e)
         {
             std::ofstream log_stream;
-            open_exception_log_stream(log_stream);
+            open_log_stream(log_stream, "exception.log");
             if (log_stream.is_open()) {
                 log_stream
                     << "Exception caught!" << std::endl
@@ -111,7 +157,7 @@ namespace gtb {
         int handle_exception(const vk::Error& e)
         {
             std::ofstream log_stream;
-            open_exception_log_stream(log_stream);
+            open_log_stream(log_stream, "exception.log");
             if (log_stream.is_open()) {
                 log_stream
                     << "Exception caught!" << std::endl
@@ -125,7 +171,7 @@ namespace gtb {
         int handle_exception(const std::exception& e)
         {
             std::ofstream log_stream;
-            open_exception_log_stream(log_stream);
+            open_log_stream(log_stream, "exception.log");
             if (log_stream.is_open()) {
                 log_stream
                     << "Exception caught!" << std::endl
@@ -139,7 +185,7 @@ namespace gtb {
         int handle_exception()
         {
             std::ofstream log_stream;
-            open_exception_log_stream(log_stream);
+            open_log_stream(log_stream, "exception.log");
             if (log_stream.is_open()) {
                 log_stream
                     << "Exception caught!" << std::endl
@@ -150,7 +196,59 @@ namespace gtb {
         }
     }
 
+    union value_2_10_10_10_snorm {
+        struct {
+            uint32_t a : 2;
+            uint32_t b : 10;
+            uint32_t g : 10;
+            uint32_t r : 10;
+        } fields;
+        uint32_t value;
+
+        value_2_10_10_10_snorm(float fb, float fg, float fr)
+        {
+            fields.a = 0;
+            fields.b = convert_float(fb);
+            fields.g = convert_float(fg);
+            fields.r = convert_float(fr);
+        }
+
+        value_2_10_10_10_snorm(uint32_t v)
+            : value(v)
+        {}
+
+        static uint32_t convert_float(float v)
+        {
+            if (v >= 1.0f) {
+                return (0x1FF);
+            }
+            else if (v <= -1.0f) {
+                return (0x3FF);
+            }
+            else {
+                v *= 511.0f; // 511 = (2 ^ (10 - 1)) - 1
+                if (v >= 0.0f) {
+                    v += 0.5f;
+                }
+                else {
+                    v -= 0.5f;
+                }
+                std::fesetround(FE_TOWARDZERO);
+                return (std::lrintf(v) & 0x3FF);
+            }
+        }
+    };
+
+    struct vertex {
+        glm::f32vec3 position;
+        glm::tvec3<value_2_10_10_10_snorm> tangent_space_basis; // x = normal, y = tangent, z = bitangent
+        glm::f32vec2 tex_coord;
+    };
+
     class application {
+        // Logging
+        std::ofstream m_log_stream;
+
         // GLFW
         GLFWwindow* m_window;
 
@@ -170,6 +268,20 @@ namespace gtb {
         std::vector<vk::ImageView> m_swap_chain_views;
         vk::Fence m_image_ready;
 
+        // Graphics memory
+        vk::PhysicalDeviceMemoryProperties m_memory_properties;
+        struct memory_types {
+            static constexpr uint32_t invalid = std::numeric_limits<uint32_t>::max();
+
+            uint32_t staging;
+            uint32_t optimized;
+
+            memory_types()
+                : staging(invalid)
+                , optimized(invalid)
+            {}
+        } m_memory_types;
+
         // Shaders
         vk::ShaderModule m_simple_vert;
         vk::ShaderModule m_simple_frag;
@@ -186,8 +298,18 @@ namespace gtb {
         std::vector<vk::CommandBuffer> m_command_buffers;
         std::vector<vk::Fence> m_command_fences;
 
-        // Frame tracking
-        uint32_t m_frame_number;
+        // Geometry objects
+        struct static_buffer {
+            vk::Buffer buffer;
+            vk::DeviceMemory device_memory;
+
+            static_buffer(vk::Buffer new_buffer, vk::DeviceMemory new_device_memory)
+                : buffer(new_buffer)
+                , device_memory(new_device_memory)
+            {}
+        };
+        typedef std::vector<static_buffer> static_buffer_vector;
+        static_buffer_vector m_static_buffers;
 
     public:
         static application* get();
@@ -250,6 +372,16 @@ namespace gtb {
         void command_buffer_init();
         void command_buffer_cleanup();
 
+        // Built-in objects
+        void builtin_init();
+
+        // Static buffers
+        static_buffer_vector::iterator create_static_buffer(
+            vk::BufferUsageFlags flags,
+            const void* data,
+            size_t sizeof_data);
+        void static_buffer_cleanup();
+
         // Disallow some C++ operations.
         application(application&&) = delete;
         application(const application&) = delete;
@@ -267,24 +399,38 @@ namespace gtb {
     application::application()
         : m_window(nullptr)
         , m_queue_family_index(std::numeric_limits<uint32_t>::max())
-        , m_frame_number(0)
     {
+        open_log_stream(m_log_stream, "runtime.log");
+
+        std::fexcept_t fe;
+        std::fesetexceptflag(&fe, 0);
+
         glfw_init();
         vk_init();
         shaders_init();
         render_pass_init();
         pipeline_init();
         command_buffer_init();
+
+        // geometry buffers and textures are either built-in or loaded.
+        builtin_init();
     }
 
     application::~application()
     {
+        if (m_device) {
+            m_device.waitIdle(m_dispatch);
+        }
+
+        static_buffer_cleanup();
         command_buffer_cleanup();
         pipeline_cleanup();
         render_pass_cleanup();
         shaders_cleanup();
         vk_cleanup();
         glfw_cleanup();
+
+        m_log_stream.close();
     }
 
     void application::glfw_init()
@@ -417,7 +563,7 @@ namespace gtb {
         // Create the vulkan instance.
         vk::ApplicationInfo application_info;
         application_info.pApplicationName = "gtb";
-        application_info.apiVersion = VK_API_VERSION_1_1;
+        application_info.apiVersion = VK_API_VERSION_1_0;
 
         vk::InstanceCreateInfo instance_create_info;
         instance_create_info.pApplicationInfo = &application_info;
@@ -438,7 +584,13 @@ namespace gtb {
 #if defined(GTB_ENABLE_VULKAN_DEBUG_LAYER)
         // Register the debug callback.
         vk::DebugReportCallbackCreateInfoEXT debug_report_create_info;
-        debug_report_create_info.flags = vk::DebugReportFlagBitsEXT::eError | vk::DebugReportFlagBitsEXT::ePerformanceWarning | vk::DebugReportFlagBitsEXT::eWarning;
+        debug_report_create_info.flags =
+            vk::DebugReportFlagBitsEXT::eError
+            | vk::DebugReportFlagBitsEXT::ePerformanceWarning
+            | vk::DebugReportFlagBitsEXT::eWarning
+            | vk::DebugReportFlagBitsEXT::eInformation
+            // | vk::DebugReportFlagBitsEXT::eDebug
+            ;
         debug_report_create_info.pfnCallback = &application::vk_debug_report;
         debug_report_create_info.pUserData = this;
 
@@ -455,7 +607,7 @@ namespace gtb {
 
         // Find a physical device and queue family index.
         vk::PhysicalDevice found_physical_device;
-        uint32_t queue_family_index;
+        uint32_t queue_family_index = std::numeric_limits<uint32_t>::max();
 
         // Enumerate all installed physical devices.
         std::vector<vk::PhysicalDevice> physical_devices = m_instance.enumeratePhysicalDevices(d);
@@ -564,6 +716,29 @@ namespace gtb {
                 << error::errinfo_capability_description("No Vulkan physical devices meets requirements."));
         }
 
+        // Select memory types for all of the allocations we need to do.
+        m_memory_properties = m_physical_device.getMemoryProperties(d);
+
+        for (uint32_t mem_type = 0; mem_type < m_memory_properties.memoryTypeCount; ++mem_type) {
+            const vk::MemoryPropertyFlags staging_flags = vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent;
+            if (((m_memory_properties.memoryTypes[mem_type].propertyFlags & staging_flags) == staging_flags) &&
+                (m_memory_types.staging == memory_types::invalid)) {
+                m_memory_types.staging = mem_type;
+            }
+
+            const vk::MemoryPropertyFlags optimized_flags = vk::MemoryPropertyFlagBits::eDeviceLocal;
+            if (((m_memory_properties.memoryTypes[mem_type].propertyFlags & optimized_flags) == optimized_flags) &&
+                (m_memory_types.optimized == memory_types::invalid)) {
+                m_memory_types.optimized = mem_type;
+            }
+        }
+
+        if (m_memory_types.staging == memory_types::invalid ||
+            m_memory_types.optimized == memory_types::invalid) {
+            BOOST_THROW_EXCEPTION(error::capability_exception()
+                << error::errinfo_capability_description("Could not find all needed memory types."));
+        }
+
         // Create the device.
         float queue_priority = 1.0f; // Priority is not important when there is only a single queue.
         vk::DeviceQueueCreateInfo queue_create_info;
@@ -578,7 +753,6 @@ namespace gtb {
         device_create_info.ppEnabledLayerNames = required_layers.data();
         device_create_info.enabledExtensionCount = static_cast<uint32_t>(required_extensions.size());
         device_create_info.ppEnabledExtensionNames = required_extensions.data();
-
         m_device = m_physical_device.createDevice(device_create_info, nullptr, d);
 
         // Init the dynamic dispatch. All future Vulkan functions will be called through this.
@@ -608,7 +782,6 @@ namespace gtb {
         swap_chain_create_info.preTransform = surface_capabilities.currentTransform;
         swap_chain_create_info.presentMode = vk::PresentModeKHR::eMailbox;
         swap_chain_create_info.clipped = VK_TRUE;
-
         m_swap_chain = m_device.createSwapchainKHR(swap_chain_create_info, nullptr, m_dispatch);
 
         // Get the images from the swap chain and create views to each.
@@ -713,7 +886,6 @@ namespace gtb {
         render_pass_create_info.pAttachments = &color_attachment;
         render_pass_create_info.subpassCount = 1;
         render_pass_create_info.pSubpasses = &simple_subpass;
-
         m_simple_render_pass = m_device.createRenderPass(render_pass_create_info, nullptr, m_dispatch);
 
         // Each render pass needs it's own set of frame buffers for the swap chain.
@@ -726,7 +898,6 @@ namespace gtb {
             frame_buffer_create_info.width = m_swap_chain_extent.width;
             frame_buffer_create_info.height = m_swap_chain_extent.height;
             frame_buffer_create_info.layers = 1;
-
             m_simple_framebuffers.emplace_back(m_device.createFramebuffer(frame_buffer_create_info, nullptr, m_dispatch));
         }
     }
@@ -745,11 +916,32 @@ namespace gtb {
     void application::pipeline_init()
     {
         // Create pipelines for each rendering method.
+        vk::VertexInputBindingDescription input_binding_vbo;
+        input_binding_vbo.binding = 0;
+        input_binding_vbo.stride = sizeof(gtb::vertex);
+        input_binding_vbo.inputRate = vk::VertexInputRate::eVertex;
+
+        vk::VertexInputAttributeDescription vertex_attrib_descriptions[3];
+        vertex_attrib_descriptions[0].location = 0;
+        vertex_attrib_descriptions[0].binding = 0;
+        vertex_attrib_descriptions[0].format = vk::Format::eR32G32B32A32Sfloat;
+        vertex_attrib_descriptions[0].offset = offsetof(gtb::vertex, position);
+
+        vertex_attrib_descriptions[1].location = 1;
+        vertex_attrib_descriptions[1].binding = 0;
+        vertex_attrib_descriptions[1].format = vk::Format::eA2B10G10R10SnormPack32;
+        vertex_attrib_descriptions[1].offset = offsetof(gtb::vertex, tangent_space_basis);
+
+        vertex_attrib_descriptions[2].location = 2;
+        vertex_attrib_descriptions[2].binding = 0;
+        vertex_attrib_descriptions[2].format = vk::Format::eR32G32Sfloat;
+        vertex_attrib_descriptions[2].offset = offsetof(gtb::vertex, tex_coord);
+
         vk::PipelineVertexInputStateCreateInfo vertex_input_create_info;
-        vertex_input_create_info.vertexBindingDescriptionCount = 0;
-        vertex_input_create_info.pVertexBindingDescriptions = nullptr;
-        vertex_input_create_info.vertexAttributeDescriptionCount = 0;
-        vertex_input_create_info.pVertexAttributeDescriptions = nullptr;
+        vertex_input_create_info.vertexBindingDescriptionCount = 1;
+        vertex_input_create_info.pVertexBindingDescriptions = &input_binding_vbo;
+        vertex_input_create_info.vertexAttributeDescriptionCount = 3;
+        vertex_input_create_info.pVertexAttributeDescriptions = vertex_attrib_descriptions;
     }
     
     void application::pipeline_cleanup()
@@ -763,17 +955,15 @@ namespace gtb {
         vk::CommandPoolCreateInfo command_pool_create_info;
         command_pool_create_info.flags = vk::CommandPoolCreateFlagBits::eTransient | vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
         command_pool_create_info.queueFamilyIndex = m_queue_family_index;
-
         m_command_pool = m_device.createCommandPool(command_pool_create_info, nullptr, m_dispatch);
 
         // Need a command buffer per frame in flight.
-        size_t frames_in_flight = m_swap_chain_views.size();
+        size_t frames_in_flight = m_swap_chain_images.size();
 
         vk::CommandBufferAllocateInfo command_buffer_allocate_info;
         command_buffer_allocate_info.commandPool = m_command_pool;
         command_buffer_allocate_info.level = vk::CommandBufferLevel::ePrimary;
-        command_buffer_allocate_info.commandBufferCount = frames_in_flight;
-
+        command_buffer_allocate_info.commandBufferCount = static_cast<uint32_t>(frames_in_flight);
         m_command_buffers = m_device.allocateCommandBuffers(command_buffer_allocate_info, m_dispatch);
 
         // Need a fence per command
@@ -788,8 +978,125 @@ namespace gtb {
 
     void application::command_buffer_cleanup()
     {
+        for (vk::Fence& fence : m_command_fences) {
+            m_device.destroyFence(fence, nullptr, m_dispatch);
+        }
+
+        if (!m_command_buffers.empty()) {
+            m_device.freeCommandBuffers(m_command_pool, m_command_buffers, m_dispatch);
+        }
+
         if (m_command_pool) {
             m_device.destroyCommandPool(m_command_pool, nullptr, m_dispatch);
+        }
+    }
+
+    void application::builtin_init()
+    {
+        // A Textured Quad (No quad primitive in Vulkan, so two tris and eat the helpers.)
+        static const gtb::vertex quad_verts[] = {
+            { { 0.0f, 0.0f, 0.0f }, { 0, 0, 0 }, { 0.0f, 0.0f } },
+            { { 0.0f, 1.0f, 0.0f }, { 0, 0, 0 }, { 0.0f, 1.0f } },
+            { { 1.0f, 1.0f, 0.0f }, { 0, 0, 0 }, { 1.0f, 1.0f } },
+            { { 1.0f, 0.0f, 0.0f }, { 0, 0, 0 }, { 1.0f, 0.0f } }
+        };
+        static_buffer_vector::iterator quad_vbo = create_static_buffer(
+            vk::BufferUsageFlagBits::eVertexBuffer,
+            quad_verts,
+            sizeof(quad_verts));
+
+        static const uint8_t quad_indices[] = {
+            0, 3, 1,
+            1, 3, 2
+        };
+        static_buffer_vector::iterator quad_ibo = create_static_buffer(
+            vk::BufferUsageFlagBits::eIndexBuffer,
+            quad_indices,
+            sizeof(quad_indices));
+    }
+
+    application::static_buffer_vector::iterator application::create_static_buffer(
+        vk::BufferUsageFlags flags,
+        const void* data,
+        size_t sizeof_data)
+    {
+        // Create staging buffer object
+        vk::BufferCreateInfo staging_create_info;
+        staging_create_info.size = sizeof_data;
+        staging_create_info.usage = vk::BufferUsageFlagBits::eTransferSrc;
+        staging_create_info.sharingMode = vk::SharingMode::eExclusive;
+        vk::Buffer staging_buffer = m_device.createBuffer(staging_create_info, nullptr, m_dispatch);
+
+        // Allocate memory for the staging buffer object.
+        vk::MemoryRequirements staging_mem_reqs = m_device.getBufferMemoryRequirements(staging_buffer, m_dispatch);
+
+        vk::MemoryAllocateInfo staging_alloc_info;
+        staging_alloc_info.allocationSize = staging_mem_reqs.size;
+        staging_alloc_info.memoryTypeIndex = m_memory_types.staging;
+        vk::DeviceMemory staging_memory = m_device.allocateMemory(staging_alloc_info, nullptr, m_dispatch);
+        m_device.bindBufferMemory(staging_buffer, staging_memory, 0, m_dispatch);
+
+        // Write the data to the staging buffer.
+        void* mapped_staging_memory = m_device.mapMemory(staging_memory, 0, sizeof_data, vk::MemoryMapFlags(), m_dispatch);
+        memcpy(mapped_staging_memory, data, sizeof_data);
+        m_device.unmapMemory(staging_memory, m_dispatch);
+
+        // Create optimized buffer object
+        vk::BufferCreateInfo optimized_create_info;
+        optimized_create_info.size = sizeof_data;
+        optimized_create_info.usage = flags | vk::BufferUsageFlagBits::eTransferDst;
+        optimized_create_info.sharingMode = vk::SharingMode::eExclusive;
+        vk::Buffer optimized_buffer = m_device.createBuffer(optimized_create_info, nullptr, m_dispatch);
+
+        // Allocate memory for the buffer object.
+        vk::MemoryRequirements optimized_mem_reqs = m_device.getBufferMemoryRequirements(optimized_buffer, m_dispatch);
+
+        vk::MemoryAllocateInfo optimized_alloc_info;
+        optimized_alloc_info.allocationSize = optimized_mem_reqs.size;
+        optimized_alloc_info.memoryTypeIndex = m_memory_types.optimized;
+        vk::DeviceMemory optimized_memory = m_device.allocateMemory(optimized_alloc_info, nullptr, m_dispatch);
+        m_device.bindBufferMemory(optimized_buffer, optimized_memory, 0, m_dispatch);
+
+        // Record a command buffer to copy the staging buffer to the optimized buffer.
+        vk::CommandBufferAllocateInfo command_buffer_allocate_info;
+        command_buffer_allocate_info.commandPool = m_command_pool;
+        command_buffer_allocate_info.level = vk::CommandBufferLevel::ePrimary;
+        command_buffer_allocate_info.commandBufferCount = 1;
+        vk::CommandBuffer copy_command_buffer = m_device.allocateCommandBuffers(command_buffer_allocate_info, m_dispatch)[0];
+
+        vk::CommandBufferBeginInfo begin_info;
+        begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+        copy_command_buffer.begin(begin_info, m_dispatch);
+
+        vk::BufferCopy copy_region;
+        copy_region.size = sizeof_data;
+        copy_command_buffer.copyBuffer(staging_buffer, optimized_buffer, copy_region, m_dispatch);
+
+        copy_command_buffer.end(m_dispatch);
+
+        // Submit the copy.
+        vk::SubmitInfo submit_info;
+        submit_info.commandBufferCount = 1;
+        submit_info.pCommandBuffers = &copy_command_buffer;
+        m_queue.submit(submit_info, nullptr, m_dispatch);
+
+        // TODO: Rather than wait here, wait at the end of the application constructor; will need to
+        // remember staging details to be freed there.
+        m_queue.waitIdle(m_dispatch);
+
+        // Cleanup.
+        m_device.freeCommandBuffers(m_command_pool, copy_command_buffer, m_dispatch);
+        m_device.destroyBuffer(staging_buffer, nullptr, m_dispatch);
+        m_device.freeMemory(staging_memory, nullptr, m_dispatch);
+
+        return (m_static_buffers.emplace(m_static_buffers.end(), optimized_buffer, optimized_memory));
+    }
+
+    void application::static_buffer_cleanup()
+    {
+        for (static_buffer& b : m_static_buffers) {
+            m_device.destroyBuffer(b.buffer, nullptr, m_dispatch);
+            m_device.freeMemory(b.device_memory, nullptr, m_dispatch);
         }
     }
 
@@ -810,17 +1117,20 @@ namespace gtb {
 
     void application::draw()
     {
-        if (++m_frame_number == 3) {
-            m_frame_number = 0;
-        }
-
-        vk::CommandBuffer& command_buffer(m_command_buffers[m_frame_number]);
-        vk::Fence& command_fence(m_command_fences[m_frame_number]);
-
         constexpr uint64_t infinite_wait = std::numeric_limits<uint64_t>::max();
+
+        // Get the next image to render to from the swap chain.
+        m_device.resetFences(m_image_ready, m_dispatch);
+        uint32_t aquired_image = m_device.acquireNextImageKHR(m_swap_chain, infinite_wait, vk::Semaphore(), m_image_ready, m_dispatch).value;
+        // TODO: Deal with suboptimal or out-of-date swapchains
+
+        // Get command buffers objects associated with this image.
+        vk::CommandBuffer& command_buffer(m_command_buffers[aquired_image]);
+        vk::Fence& command_fence(m_command_fences[aquired_image]);
 
         // Wait for the commands complete fence in order to record.
         m_device.waitForFences(command_fence, VK_FALSE, infinite_wait, m_dispatch);
+        m_device.resetFences(command_fence, m_dispatch);
 
         // Now we can reset and record a new command buffer for this frame.
         command_buffer.reset(vk::CommandBufferResetFlags(), m_dispatch);
@@ -834,7 +1144,7 @@ namespace gtb {
 
         vk::RenderPassBeginInfo pass_begin_info;
         pass_begin_info.renderPass = m_simple_render_pass;
-        pass_begin_info.framebuffer = m_simple_framebuffers[m_frame_number];
+        pass_begin_info.framebuffer = m_simple_framebuffers[aquired_image];
         pass_begin_info.renderArea.offset = vk::Offset2D(0, 0);
         pass_begin_info.renderArea.extent = m_swap_chain_extent;
         pass_begin_info.clearValueCount = 1;
@@ -846,11 +1156,7 @@ namespace gtb {
         command_buffer.endRenderPass(m_dispatch);
         command_buffer.end(m_dispatch);
 
-        m_device.resetFences({m_image_ready, command_fence}, m_dispatch);
-
-        // Get the next image to render to from the swap chain, once it's off-screen.
-        uint32_t aquired_image = m_device.acquireNextImageKHR(m_swap_chain, infinite_wait, vk::Semaphore(), m_image_ready, m_dispatch).value;
-        // TODO: Deal with suboptimal or out-of-date swapchains
+        // Now we need our aquired image to actually be ready.
         m_device.waitForFences(m_image_ready, VK_FALSE, infinite_wait, m_dispatch);
 
         // Submit work
@@ -868,7 +1174,7 @@ namespace gtb {
     }
 
     // static
-    void application::glfw_key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
+    void application::glfw_key_callback(GLFWwindow* window, int key, int /*scancode*/, int action, int /*mods*/)
     {
         if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
             glfwSetWindowShouldClose(window, GLFW_TRUE);
@@ -912,7 +1218,14 @@ namespace gtb {
                 << error::errinfo_vk_debug_report_error_layer_prefix(layer_prefix)
                 << error::errinfo_vk_debug_report_error_message(message));
         }
-        // TODO: How to deal with other debug report types?
+        else {
+            app->m_log_stream
+                << "Vulkan debug report:" << std::endl
+                << " Flags = " << vk::to_string(vk::DebugReportFlagBitsEXT(flags)) << std::endl
+                << " Object Type = " << vk::to_string(vk::ObjectType(object_type)) << std::endl
+                << " Layer Prefix = " << layer_prefix << std::endl
+                << " Message = " << message << std::endl;
+        }
 
         return (VK_FALSE);
     }
@@ -943,6 +1256,14 @@ int main(int argc, char* argv[])
     return (ret_val);
 }
 
+#if defined(__clang__)
 extern "C" {
     __attribute__((dllexport)) __attribute__((selectany)) uint32_t NvOptimusEnablement = 0x00000001;
 }
+#elif defined(_MSC_VER)
+extern "C" {
+    __declspec(dllexport, selectany) uint32_t NvOptimusEnablement = 0x00000001;
+}
+#else
+#error How to declare NvOptimusEnablement with other compilers?
+#endif

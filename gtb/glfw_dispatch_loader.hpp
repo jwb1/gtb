@@ -86,6 +86,12 @@ namespace gtb {
                 glfwGetInstanceProcAddress(m_instance, "vkGetPhysicalDeviceQueueFamilyProperties"));
             get_physical_device_queue_family_properties(pd, c, qfp);
         }
+        void vkGetPhysicalDeviceMemoryProperties( VkPhysicalDevice pd, VkPhysicalDeviceMemoryProperties* mp) const
+        {
+            PFN_vkGetPhysicalDeviceMemoryProperties get_physical_device_memory_properties = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
+                glfwGetInstanceProcAddress(m_instance, "vkGetPhysicalDeviceMemoryProperties"));
+            get_physical_device_memory_properties(pd, mp);            
+        }
         VkResult vkGetPhysicalDeviceSurfaceSupportKHR(VkPhysicalDevice pd, uint32_t qf, VkSurfaceKHR s, VkBool32* b) const
         {
             PFN_vkGetPhysicalDeviceSurfaceSupportKHR get_physical_device_surface_support = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceSupportKHR>(

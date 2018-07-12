@@ -1,1 +1,6 @@
+# Build artifact directory.
 build/
+# Visual Studio 2017 cache/options directory.
+.vs/
+# User-specific files
+*.user
