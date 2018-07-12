@@ -291,7 +291,7 @@ namespace gtb {
         std::vector<vk::Framebuffer> m_simple_framebuffers;
 
         // Pipelines
-        vk::PipelineLayout m_simple_pipeline_layout;
+        vk::Pipeline m_simple_pipeline;
 
         // Command buffers (normally per-rendering thread)
         vk::CommandPool m_command_pool;
@@ -916,6 +916,19 @@ namespace gtb {
     void application::pipeline_init()
     {
         // Create pipelines for each rendering method.
+
+        // Shaders.
+        vk::PipelineShaderStageCreateInfo shader_stage_create_info[2];
+
+        shader_stage_create_info[0].stage = vk::ShaderStageFlagBits::eVertex;
+        shader_stage_create_info[0].module = m_simple_vert;
+        shader_stage_create_info[0].pName = "main";
+
+        shader_stage_create_info[1].stage = vk::ShaderStageFlagBits::eFragment;
+        shader_stage_create_info[1].module = m_simple_frag;
+        shader_stage_create_info[1].pName = "main";
+
+        // Vertex attribute layout.
         vk::VertexInputBindingDescription input_binding_vbo;
         input_binding_vbo.binding = 0;
         input_binding_vbo.stride = sizeof(gtb::vertex);
@@ -942,11 +955,78 @@ namespace gtb {
         vertex_input_create_info.pVertexBindingDescriptions = &input_binding_vbo;
         vertex_input_create_info.vertexAttributeDescriptionCount = 3;
         vertex_input_create_info.pVertexAttributeDescriptions = vertex_attrib_descriptions;
+
+        // Input assembly.
+        vk::PipelineInputAssemblyStateCreateInfo input_assembly_create_info;
+        input_assembly_create_info.topology = vk::PrimitiveTopology::eTriangleList;
+
+        // Viewport and scissor.
+        vk::Viewport viewport;
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = static_cast<float>(m_swap_chain_extent.width);
+        viewport.height = static_cast<float>(m_swap_chain_extent.height);
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+
+        vk::Rect2D scissor;
+        scissor.offset = vk::Offset2D(0, 0);
+        scissor.extent = m_swap_chain_extent;
+
+        vk::PipelineViewportStateCreateInfo viewport_create_info;
+        viewport_create_info.viewportCount = 1;
+        viewport_create_info.pViewports = &viewport;
+        viewport_create_info.scissorCount = 1;
+        viewport_create_info.pScissors = &scissor;
+
+        // Rasterizer.
+        vk::PipelineRasterizationStateCreateInfo rasterization_create_info;
+        rasterization_create_info.depthClampEnable = VK_FALSE;
+        rasterization_create_info.rasterizerDiscardEnable = VK_FALSE;
+        rasterization_create_info.polygonMode = vk::PolygonMode::eFill;
+        rasterization_create_info.cullMode = vk::CullModeFlagBits::eBack;
+        rasterization_create_info.frontFace = vk::FrontFace::eCounterClockwise;
+        rasterization_create_info.depthBiasEnable = VK_FALSE;
+
+        // Multisampling.
+        vk::PipelineMultisampleStateCreateInfo multisample_create_info;
+        multisample_create_info.rasterizationSamples = vk::SampleCountFlagBits::e1;
+        multisample_create_info.sampleShadingEnable = VK_FALSE;
+
+        // Blending.
+        vk::PipelineColorBlendAttachmentState color_blend_attachment;
+        color_blend_attachment.blendEnable = VK_FALSE;
+        color_blend_attachment.colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
+            vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA;
+
+        vk::PipelineColorBlendStateCreateInfo blend_create_info;
+        blend_create_info.logicOpEnable = VK_FALSE;
+        blend_create_info.attachmentCount = 1;
+        blend_create_info.pAttachments = &color_blend_attachment;
+
+        // Combine the pipeline.
+        vk::GraphicsPipelineCreateInfo pipeline_create_info;
+        pipeline_create_info.stageCount = 2;
+        pipeline_create_info.pStages = shader_stage_create_info;
+        pipeline_create_info.pVertexInputState = &vertex_input_create_info;
+        pipeline_create_info.pInputAssemblyState = &input_assembly_create_info;
+        pipeline_create_info.pViewportState = &viewport_create_info;
+        pipeline_create_info.pRasterizationState = &rasterization_create_info;
+        pipeline_create_info.pMultisampleState = &multisample_create_info;
+        //pipeline_create_info.pDepthStencilState = ;
+        pipeline_create_info.pColorBlendState = &blend_create_info;
+        //pipeline_create_info.layout = ;
+        pipeline_create_info.renderPass = m_simple_render_pass;
+        pipeline_create_info.subpass = 0;
+
+        m_simple_pipeline = m_device.createGraphicsPipeline(vk::PipelineCache(), pipeline_create_info, nullptr, m_dispatch);
     }
     
     void application::pipeline_cleanup()
     {
-
+        if (m_simple_pipeline) {
+            m_device.destroyPipeline(m_simple_pipeline, nullptr, m_dispatch);
+        }
     }
 
     void application::command_buffer_init()
