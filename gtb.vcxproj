@@ -87,6 +87,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="gtb\dbg_out.hpp" />
     <ClInclude Include="gtb\glfw_dispatch_loader.hpp" />
   </ItemGroup>
   <ItemGroup>

@@ -46,18 +46,21 @@
 #define GLM_FORCE_AVX
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #define GLM_FORCE_RADIANS
+#define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
+#include <glm/gtx/transform.hpp>
 #if defined(_MSC_VER)
 #pragma warning (pop)
 #endif
 
 // Local helper classes
 #include "gtb/glfw_dispatch_loader.hpp"
+#include "gtb/dbg_out.hpp"
+
+#define GTB_ENABLE_VULKAN_DEBUG_LAYER
 
 /*
 ~~ Math Conventions ~~
-- Right handed coordinate space to match OpenGL conventions
-- Counter-clockwise winding as front facing
 - Vectors are treated as column vectors
 - Matrices are stored column major; eg m[col][row] aka m[col] returns a column
 |m00 m10 m20 m30|         |m0 m4 m8  m12|
@@ -75,15 +78,22 @@ If T, S, and R and transformations, then the product M = T * S * R will apply
 R first, then S, the T, geometrically.
 - Translation lives in column 3 (m12, m13, m14) when transforming homogeneous vectors
 
-- Eye space places the camera at (0, 0, 0), looking in the direction of the -Z axis,
-which is the standard for OpenGL.
+- Eye space places the camera at (0, 0, 0), looking in the direction of the +Z axis,
+positive X to the right and positive y down. This is right handed.
+- Counter-clockwise winding in eye space as front facing
 - Clip space dimensions [[-1, 1], [-1, 1], [0,1]], where geometry with (x,y)
-normalized device coordinates of (-1,-1) correspond to the lower-left corner of the
+normalized device coordinates of (-1,-1) correspond to the upper-left corner of the
 viewport and the near and far planes correspond to z normalized device coordinates
 of 0 and +1, respectively.
+- https://matthewwellings.com/blog/the-new-vulkan-coordinate-system/
 */
 
 namespace gtb {
+    uint32_t align_up(uint32_t value, uint32_t align)
+    {
+        return ((value + align - 1) & ~(align - 1));
+    }
+
     void open_log_stream(std::ofstream& log_stream, const std::string& file_name)
     {
         boost::filesystem::path log_file_path(std::getenv("LOCALAPPDATA"));
@@ -120,7 +130,7 @@ namespace gtb {
         typedef boost::error_info<struct errinfo_vk_debug_report_error_layer_prefix_, const char*> errinfo_vk_debug_report_error_layer_prefix;
         typedef boost::error_info<struct errinfo_vk_debug_report_error_message_, const char*> errinfo_vk_debug_report_error_message;
 
-        // File i/o failures throw these.
+        // File I/O failures throw these.
         class file_exception : public exception {};
 
         typedef boost::error_info<struct errinfo_file_exception_file_, const char*> errinfo_file_exception_file;
@@ -241,11 +251,13 @@ namespace gtb {
 
     struct vertex {
         glm::f32vec3 position;
-        glm::tvec3<value_2_10_10_10_snorm> tangent_space_basis; // x = normal, y = tangent, z = bitangent
+        value_2_10_10_10_snorm tangent_space_basis; // x = normal, y = tangent, z = bitangent
         glm::f32vec2 tex_coord;
     };
 
     class application {
+        static constexpr uint32_t ubo_size = 65535;
+
         // Logging
         std::ofstream m_log_stream;
 
@@ -260,6 +272,8 @@ namespace gtb {
         vk::Device m_device;
         vk::Queue m_queue;
         vk::DispatchLoaderDynamic m_dispatch;
+
+        // Swap chain for display
         vk::SurfaceKHR m_surface;
         vk::Format m_swap_chain_format;
         vk::Extent2D m_swap_chain_extent;
@@ -291,6 +305,9 @@ namespace gtb {
         std::vector<vk::Framebuffer> m_simple_framebuffers;
 
         // Pipelines
+        vk::DescriptorSetLayout m_simple_descriptor_set_layout;
+        vk::PipelineLayout m_simple_pipeline_layout;
+        std::vector<vk::DescriptorSet> m_simple_descriptor_sets;
         vk::Pipeline m_simple_pipeline;
 
         // Command buffers (normally per-rendering thread)
@@ -298,18 +315,33 @@ namespace gtb {
         std::vector<vk::CommandBuffer> m_command_buffers;
         std::vector<vk::Fence> m_command_fences;
 
-        // Geometry objects
-        struct static_buffer {
+        // Buffers.
+        struct device_buffer {
             vk::Buffer buffer;
             vk::DeviceMemory device_memory;
-
-            static_buffer(vk::Buffer new_buffer, vk::DeviceMemory new_device_memory)
-                : buffer(new_buffer)
-                , device_memory(new_device_memory)
-            {}
         };
-        typedef std::vector<static_buffer> static_buffer_vector;
-        static_buffer_vector m_static_buffers;
+        typedef std::vector<device_buffer> device_buffer_vector;
+
+        // Uniform buffers
+        uint32_t m_ubo_min_field_align;
+        device_buffer_vector m_uniform_buffers;
+        vk::DescriptorPool m_descriptor_pool;
+
+        // Geometry objects
+        device_buffer_vector m_static_geometry_buffers;
+
+        struct draw_record {
+            glm::mat4 transform;
+            glm::vec3 color;
+
+            uint32_t index_count;
+            uint32_t first_index;
+            int32_t vertex_offset;
+            uint8_t vbo;
+            uint8_t ibo;
+        };
+        typedef std::vector<draw_record> draw_vector;
+        draw_vector m_draws;
 
     public:
         static application* get();
@@ -368,19 +400,25 @@ namespace gtb {
         void pipeline_init();
         void pipeline_cleanup();
 
-        // Command buffers
-        void command_buffer_init();
-        void command_buffer_cleanup();
+        // Per-frame buffers
+        void per_frame_init();
+        void per_frame_cleanup();
 
         // Built-in objects
         void builtin_init();
 
-        // Static buffers
-        static_buffer_vector::iterator create_static_buffer(
+        // Buffers
+        device_buffer_vector::iterator create_static_geometry_buffer(
             vk::BufferUsageFlags flags,
             const void* data,
             size_t sizeof_data);
-        void static_buffer_cleanup();
+        void static_geometry_buffer_cleanup();
+
+        device_buffer create_device_buffer(
+            vk::BufferUsageFlags flags,
+            size_t sizeof_data,
+            uint32_t memory_index);
+        void cleanup_device_buffer(device_buffer& b);
 
         // Disallow some C++ operations.
         application(application&&) = delete;
@@ -399,6 +437,7 @@ namespace gtb {
     application::application()
         : m_window(nullptr)
         , m_queue_family_index(std::numeric_limits<uint32_t>::max())
+        , m_ubo_min_field_align(0)
     {
         open_log_stream(m_log_stream, "runtime.log");
 
@@ -409,8 +448,8 @@ namespace gtb {
         vk_init();
         shaders_init();
         render_pass_init();
+        per_frame_init();
         pipeline_init();
-        command_buffer_init();
 
         // geometry buffers and textures are either built-in or loaded.
         builtin_init();
@@ -422,9 +461,9 @@ namespace gtb {
             m_device.waitIdle(m_dispatch);
         }
 
-        static_buffer_cleanup();
-        command_buffer_cleanup();
+        static_geometry_buffer_cleanup();
         pipeline_cleanup();
+        per_frame_cleanup();
         render_pass_cleanup();
         shaders_cleanup();
         vk_cleanup();
@@ -739,6 +778,10 @@ namespace gtb {
                 << error::errinfo_capability_description("Could not find all needed memory types."));
         }
 
+        // Need some device-specific info.
+        vk::PhysicalDeviceProperties device_props = m_physical_device.getProperties(d);
+        m_ubo_min_field_align = static_cast<uint32_t>(device_props.limits.minUniformBufferOffsetAlignment);
+
         // Create the device.
         float queue_priority = 1.0f; // Priority is not important when there is only a single queue.
         vk::DeviceQueueCreateInfo queue_create_info;
@@ -913,6 +956,74 @@ namespace gtb {
         }
     }
 
+    void application::per_frame_init()
+    {
+        // Command pool is the allocator wrapper.
+        vk::CommandPoolCreateInfo command_pool_create_info;
+        command_pool_create_info.flags = vk::CommandPoolCreateFlagBits::eTransient | vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
+        command_pool_create_info.queueFamilyIndex = m_queue_family_index;
+        m_command_pool = m_device.createCommandPool(command_pool_create_info, nullptr, m_dispatch);
+
+        // Need a command buffer per frame in flight.
+        uint32_t frames_in_flight = static_cast<uint32_t>(m_swap_chain_images.size());
+
+        vk::CommandBufferAllocateInfo command_buffer_allocate_info;
+        command_buffer_allocate_info.commandPool = m_command_pool;
+        command_buffer_allocate_info.level = vk::CommandBufferLevel::ePrimary;
+        command_buffer_allocate_info.commandBufferCount = frames_in_flight;
+        m_command_buffers = m_device.allocateCommandBuffers(command_buffer_allocate_info, m_dispatch);
+
+        // Need a uniform buffer per frame in flight as well.
+        m_uniform_buffers.reserve(frames_in_flight);
+        for (uint32_t i = 0; i < frames_in_flight; ++i) {
+            m_uniform_buffers.emplace_back(create_device_buffer(vk::BufferUsageFlagBits::eUniformBuffer, ubo_size, m_memory_types.staging));
+        }
+
+        // Descriptors help us bind uniform buffer memory. Need a pool object to allocate them.
+        vk::DescriptorPoolSize descriptor_pool_size;
+        descriptor_pool_size.type = vk::DescriptorType::eUniformBufferDynamic;
+        descriptor_pool_size.descriptorCount = frames_in_flight * 2;
+
+        vk::DescriptorPoolCreateInfo descriptor_pool_create_info;
+        descriptor_pool_create_info.maxSets = frames_in_flight;
+        descriptor_pool_create_info.poolSizeCount = 1;
+        descriptor_pool_create_info.pPoolSizes = &descriptor_pool_size;
+
+        m_descriptor_pool = m_device.createDescriptorPool(descriptor_pool_create_info, nullptr, m_dispatch);
+
+        // Need a fence per command buffer / uniform buffer.
+        vk::FenceCreateInfo fence_create_info;
+        fence_create_info.flags = vk::FenceCreateFlagBits::eSignaled;
+
+        m_command_fences.reserve(frames_in_flight);
+        for (uint32_t i = 0; i < frames_in_flight; ++i) {
+            m_command_fences.emplace_back(m_device.createFence(fence_create_info, nullptr, m_dispatch));
+        }
+    }
+
+    void application::per_frame_cleanup()
+    {
+        for (vk::Fence& fence : m_command_fences) {
+            m_device.destroyFence(fence, nullptr, m_dispatch);
+        }
+
+        if (m_descriptor_pool) {
+            m_device.destroyDescriptorPool(m_descriptor_pool, nullptr, m_dispatch);
+        }
+
+        for (device_buffer& b : m_uniform_buffers) {
+            cleanup_device_buffer(b);
+        }
+
+        if (!m_command_buffers.empty()) {
+            m_device.freeCommandBuffers(m_command_pool, m_command_buffers, m_dispatch);
+        }
+
+        if (m_command_pool) {
+            m_device.destroyCommandPool(m_command_pool, nullptr, m_dispatch);
+        }
+    }
+
     void application::pipeline_init()
     {
         // Create pipelines for each rendering method.
@@ -937,7 +1048,7 @@ namespace gtb {
         vk::VertexInputAttributeDescription vertex_attrib_descriptions[3];
         vertex_attrib_descriptions[0].location = 0;
         vertex_attrib_descriptions[0].binding = 0;
-        vertex_attrib_descriptions[0].format = vk::Format::eR32G32B32A32Sfloat;
+        vertex_attrib_descriptions[0].format = vk::Format::eR32G32B32Sfloat;
         vertex_attrib_descriptions[0].offset = offsetof(gtb::vertex, position);
 
         vertex_attrib_descriptions[1].location = 1;
@@ -953,7 +1064,7 @@ namespace gtb {
         vk::PipelineVertexInputStateCreateInfo vertex_input_create_info;
         vertex_input_create_info.vertexBindingDescriptionCount = 1;
         vertex_input_create_info.pVertexBindingDescriptions = &input_binding_vbo;
-        vertex_input_create_info.vertexAttributeDescriptionCount = 3;
+        vertex_input_create_info.vertexAttributeDescriptionCount = _countof(vertex_attrib_descriptions);
         vertex_input_create_info.pVertexAttributeDescriptions = vertex_attrib_descriptions;
 
         // Input assembly.
@@ -984,9 +1095,10 @@ namespace gtb {
         rasterization_create_info.depthClampEnable = VK_FALSE;
         rasterization_create_info.rasterizerDiscardEnable = VK_FALSE;
         rasterization_create_info.polygonMode = vk::PolygonMode::eFill;
-        rasterization_create_info.cullMode = vk::CullModeFlagBits::eBack;
+        rasterization_create_info.cullMode = vk::CullModeFlagBits::eBack; //vk::CullModeFlagBits::eNone;
         rasterization_create_info.frontFace = vk::FrontFace::eCounterClockwise;
         rasterization_create_info.depthBiasEnable = VK_FALSE;
+        rasterization_create_info.lineWidth = 1.0f;
 
         // Multisampling.
         vk::PipelineMultisampleStateCreateInfo multisample_create_info;
@@ -1004,9 +1116,68 @@ namespace gtb {
         blend_create_info.attachmentCount = 1;
         blend_create_info.pAttachments = &color_blend_attachment;
 
+        // UBO layout.
+        vk::DescriptorSetLayoutBinding set_layout_bindings[2];
+        set_layout_bindings[0].binding = 0;
+        set_layout_bindings[0].descriptorType = vk::DescriptorType::eUniformBufferDynamic;
+        set_layout_bindings[0].descriptorCount = 1;
+        set_layout_bindings[0].stageFlags = vk::ShaderStageFlagBits::eVertex;
+
+        set_layout_bindings[1].binding = 1;
+        set_layout_bindings[1].descriptorType = vk::DescriptorType::eUniformBufferDynamic;
+        set_layout_bindings[1].descriptorCount = 1;
+        set_layout_bindings[1].stageFlags = vk::ShaderStageFlagBits::eFragment;
+
+        vk::DescriptorSetLayoutCreateInfo set_layout_create_info;
+        set_layout_create_info.bindingCount = _countof(set_layout_bindings);
+        set_layout_create_info.pBindings = set_layout_bindings;
+        m_simple_descriptor_set_layout = m_device.createDescriptorSetLayout(set_layout_create_info, nullptr, m_dispatch);
+
+        vk::PipelineLayoutCreateInfo layout_create_info;
+        layout_create_info.setLayoutCount = 1;
+        layout_create_info.pSetLayouts = &m_simple_descriptor_set_layout;
+        m_simple_pipeline_layout = m_device.createPipelineLayout(layout_create_info, nullptr, m_dispatch);
+
+        uint32_t frames_in_flight = static_cast<uint32_t>(m_swap_chain_images.size());
+
+        std::vector<vk::DescriptorSetLayout> replicated_set_layouts(frames_in_flight, m_simple_descriptor_set_layout);
+        vk::DescriptorSetAllocateInfo set_allocate_info;
+        set_allocate_info.descriptorPool = m_descriptor_pool;
+        set_allocate_info.descriptorSetCount = frames_in_flight;
+        set_allocate_info.pSetLayouts = replicated_set_layouts.data();
+
+        m_simple_descriptor_sets = m_device.allocateDescriptorSets(set_allocate_info, m_dispatch);
+
+        for (uint32_t i = 0; i < frames_in_flight; ++i) {
+            vk::DescriptorBufferInfo descriptor_buffer_info[2];
+            vk::WriteDescriptorSet write_descriptor_set[2];
+
+            descriptor_buffer_info[0].buffer = m_uniform_buffers[i].buffer;
+            descriptor_buffer_info[0].offset = 0; // Offsets will be set dynamically at bind time.
+            descriptor_buffer_info[0].range = sizeof(glm::mat4);
+
+            write_descriptor_set[0].dstSet = m_simple_descriptor_sets[i];
+            write_descriptor_set[0].dstBinding = 0;
+            write_descriptor_set[0].descriptorType = vk::DescriptorType::eUniformBufferDynamic;
+            write_descriptor_set[0].descriptorCount = 1;
+            write_descriptor_set[0].pBufferInfo = &descriptor_buffer_info[0];
+
+            descriptor_buffer_info[1].buffer = m_uniform_buffers[i].buffer;
+            descriptor_buffer_info[1].offset = 0; // Offsets will be set dynamically at bind time.
+            descriptor_buffer_info[1].range = sizeof(glm::vec3);
+
+            write_descriptor_set[1].dstSet = m_simple_descriptor_sets[i];
+            write_descriptor_set[1].dstBinding = 1;
+            write_descriptor_set[1].descriptorType = vk::DescriptorType::eUniformBufferDynamic;
+            write_descriptor_set[1].descriptorCount = 1;
+            write_descriptor_set[1].pBufferInfo = &descriptor_buffer_info[1];
+
+            m_device.updateDescriptorSets(_countof(write_descriptor_set), write_descriptor_set, 0, nullptr, m_dispatch);
+        }
+
         // Combine the pipeline.
         vk::GraphicsPipelineCreateInfo pipeline_create_info;
-        pipeline_create_info.stageCount = 2;
+        pipeline_create_info.stageCount = _countof(shader_stage_create_info);
         pipeline_create_info.pStages = shader_stage_create_info;
         pipeline_create_info.pVertexInputState = &vertex_input_create_info;
         pipeline_create_info.pInputAssemblyState = &input_assembly_create_info;
@@ -1015,7 +1186,7 @@ namespace gtb {
         pipeline_create_info.pMultisampleState = &multisample_create_info;
         //pipeline_create_info.pDepthStencilState = ;
         pipeline_create_info.pColorBlendState = &blend_create_info;
-        //pipeline_create_info.layout = ;
+        pipeline_create_info.layout = m_simple_pipeline_layout;
         pipeline_create_info.renderPass = m_simple_render_pass;
         pipeline_create_info.subpass = 0;
 
@@ -1027,47 +1198,13 @@ namespace gtb {
         if (m_simple_pipeline) {
             m_device.destroyPipeline(m_simple_pipeline, nullptr, m_dispatch);
         }
-    }
 
-    void application::command_buffer_init()
-    {
-        // Command pool is the allocator wrapper.
-        vk::CommandPoolCreateInfo command_pool_create_info;
-        command_pool_create_info.flags = vk::CommandPoolCreateFlagBits::eTransient | vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
-        command_pool_create_info.queueFamilyIndex = m_queue_family_index;
-        m_command_pool = m_device.createCommandPool(command_pool_create_info, nullptr, m_dispatch);
-
-        // Need a command buffer per frame in flight.
-        size_t frames_in_flight = m_swap_chain_images.size();
-
-        vk::CommandBufferAllocateInfo command_buffer_allocate_info;
-        command_buffer_allocate_info.commandPool = m_command_pool;
-        command_buffer_allocate_info.level = vk::CommandBufferLevel::ePrimary;
-        command_buffer_allocate_info.commandBufferCount = static_cast<uint32_t>(frames_in_flight);
-        m_command_buffers = m_device.allocateCommandBuffers(command_buffer_allocate_info, m_dispatch);
-
-        // Need a fence per command
-        vk::FenceCreateInfo fence_create_info;
-        fence_create_info.flags = vk::FenceCreateFlagBits::eSignaled;
-
-        m_command_fences.reserve(frames_in_flight);
-        for (size_t i = 0; i < frames_in_flight; ++i) {
-            m_command_fences.emplace_back(m_device.createFence(fence_create_info, nullptr, m_dispatch));
-        }
-    }
-
-    void application::command_buffer_cleanup()
-    {
-        for (vk::Fence& fence : m_command_fences) {
-            m_device.destroyFence(fence, nullptr, m_dispatch);
+        if (m_simple_pipeline_layout) {
+            m_device.destroyPipelineLayout(m_simple_pipeline_layout, nullptr, m_dispatch);
         }
 
-        if (!m_command_buffers.empty()) {
-            m_device.freeCommandBuffers(m_command_pool, m_command_buffers, m_dispatch);
-        }
-
-        if (m_command_pool) {
-            m_device.destroyCommandPool(m_command_pool, nullptr, m_dispatch);
+        if (m_simple_descriptor_set_layout) {
+            m_device.destroyDescriptorSetLayout(m_simple_descriptor_set_layout, nullptr, m_dispatch);
         }
     }
 
@@ -1075,67 +1212,45 @@ namespace gtb {
     {
         // A Textured Quad (No quad primitive in Vulkan, so two tris and eat the helpers.)
         static const gtb::vertex quad_verts[] = {
-            { { 0.0f, 0.0f, 0.0f }, { 0, 0, 0 }, { 0.0f, 0.0f } },
-            { { 0.0f, 1.0f, 0.0f }, { 0, 0, 0 }, { 0.0f, 1.0f } },
-            { { 1.0f, 1.0f, 0.0f }, { 0, 0, 0 }, { 1.0f, 1.0f } },
-            { { 1.0f, 0.0f, 0.0f }, { 0, 0, 0 }, { 1.0f, 0.0f } }
+            { { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f } },
+            { { 0.0f, 1.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f } },
+            { { 1.0f, 1.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f } },
+            { { 1.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 0.0f } }
         };
-        static_buffer_vector::iterator quad_vbo = create_static_buffer(
+        device_buffer_vector::iterator quad_vbo = create_static_geometry_buffer(
             vk::BufferUsageFlagBits::eVertexBuffer,
             quad_verts,
             sizeof(quad_verts));
+        uint8_t vbo_index = static_cast<uint8_t>(quad_vbo - m_static_geometry_buffers.begin());
 
-        static const uint8_t quad_indices[] = {
-            0, 3, 1,
-            1, 3, 2
+        static const uint16_t quad_indices[] = {
+            0, 1, 3,
+            1, 2, 3
         };
-        static_buffer_vector::iterator quad_ibo = create_static_buffer(
+        device_buffer_vector::iterator quad_ibo = create_static_geometry_buffer(
             vk::BufferUsageFlagBits::eIndexBuffer,
             quad_indices,
             sizeof(quad_indices));
+        uint8_t ibo_index = static_cast<uint8_t>(quad_ibo - m_static_geometry_buffers.begin());
+
+        m_draws.push_back({ glm::scale(glm::vec3(0.75f, 0.75f, 1.0f)), glm::vec3(1.0f, 0.0f, 0.0f), 6, 0, 0, vbo_index, ibo_index });
     }
 
-    application::static_buffer_vector::iterator application::create_static_buffer(
+    application::device_buffer_vector::iterator application::create_static_geometry_buffer(
         vk::BufferUsageFlags flags,
         const void* data,
         size_t sizeof_data)
     {
-        // Create staging buffer object
-        vk::BufferCreateInfo staging_create_info;
-        staging_create_info.size = sizeof_data;
-        staging_create_info.usage = vk::BufferUsageFlagBits::eTransferSrc;
-        staging_create_info.sharingMode = vk::SharingMode::eExclusive;
-        vk::Buffer staging_buffer = m_device.createBuffer(staging_create_info, nullptr, m_dispatch);
-
-        // Allocate memory for the staging buffer object.
-        vk::MemoryRequirements staging_mem_reqs = m_device.getBufferMemoryRequirements(staging_buffer, m_dispatch);
-
-        vk::MemoryAllocateInfo staging_alloc_info;
-        staging_alloc_info.allocationSize = staging_mem_reqs.size;
-        staging_alloc_info.memoryTypeIndex = m_memory_types.staging;
-        vk::DeviceMemory staging_memory = m_device.allocateMemory(staging_alloc_info, nullptr, m_dispatch);
-        m_device.bindBufferMemory(staging_buffer, staging_memory, 0, m_dispatch);
+        // Need a staging buffer to upload the data from.
+        device_buffer staging_buffer = create_device_buffer(vk::BufferUsageFlagBits::eTransferSrc, sizeof_data, m_memory_types.staging);
 
         // Write the data to the staging buffer.
-        void* mapped_staging_memory = m_device.mapMemory(staging_memory, 0, sizeof_data, vk::MemoryMapFlags(), m_dispatch);
+        void* mapped_staging_memory = m_device.mapMemory(staging_buffer.device_memory, 0, sizeof_data, vk::MemoryMapFlags(), m_dispatch);
         memcpy(mapped_staging_memory, data, sizeof_data);
-        m_device.unmapMemory(staging_memory, m_dispatch);
+        m_device.unmapMemory(staging_buffer.device_memory, m_dispatch);
 
-        // Create optimized buffer object
-        vk::BufferCreateInfo optimized_create_info;
-        optimized_create_info.size = sizeof_data;
-        optimized_create_info.usage = flags | vk::BufferUsageFlagBits::eTransferDst;
-        optimized_create_info.sharingMode = vk::SharingMode::eExclusive;
-        vk::Buffer optimized_buffer = m_device.createBuffer(optimized_create_info, nullptr, m_dispatch);
-
-        // Allocate memory for the buffer object.
-        vk::MemoryRequirements optimized_mem_reqs = m_device.getBufferMemoryRequirements(optimized_buffer, m_dispatch);
-
-        vk::MemoryAllocateInfo optimized_alloc_info;
-        optimized_alloc_info.allocationSize = optimized_mem_reqs.size;
-        optimized_alloc_info.memoryTypeIndex = m_memory_types.optimized;
-        vk::DeviceMemory optimized_memory = m_device.allocateMemory(optimized_alloc_info, nullptr, m_dispatch);
-        m_device.bindBufferMemory(optimized_buffer, optimized_memory, 0, m_dispatch);
+        // Optimized buffer for actual GPU use.
+        device_buffer optimized_buffer = create_device_buffer(flags | vk::BufferUsageFlagBits::eTransferDst, sizeof_data, m_memory_types.optimized);
 
         // Record a command buffer to copy the staging buffer to the optimized buffer.
         vk::CommandBufferAllocateInfo command_buffer_allocate_info;
@@ -1150,7 +1265,7 @@ namespace gtb {
 
         vk::BufferCopy copy_region;
         copy_region.size = sizeof_data;
-        copy_command_buffer.copyBuffer(staging_buffer, optimized_buffer, copy_region, m_dispatch);
+        copy_command_buffer.copyBuffer(staging_buffer.buffer, optimized_buffer.buffer, copy_region, m_dispatch);
 
         copy_command_buffer.end(m_dispatch);
 
@@ -1166,18 +1281,48 @@ namespace gtb {
 
         // Cleanup.
         m_device.freeCommandBuffers(m_command_pool, copy_command_buffer, m_dispatch);
-        m_device.destroyBuffer(staging_buffer, nullptr, m_dispatch);
-        m_device.freeMemory(staging_memory, nullptr, m_dispatch);
+        cleanup_device_buffer(staging_buffer);
 
-        return (m_static_buffers.emplace(m_static_buffers.end(), optimized_buffer, optimized_memory));
+        return (m_static_geometry_buffers.emplace(m_static_geometry_buffers.end(), optimized_buffer));
     }
 
-    void application::static_buffer_cleanup()
+    void application::static_geometry_buffer_cleanup()
     {
-        for (static_buffer& b : m_static_buffers) {
-            m_device.destroyBuffer(b.buffer, nullptr, m_dispatch);
-            m_device.freeMemory(b.device_memory, nullptr, m_dispatch);
+        for (device_buffer& b : m_static_geometry_buffers) {
+            cleanup_device_buffer(b);
         }
+    }
+
+    application::device_buffer application::create_device_buffer(
+        vk::BufferUsageFlags flags,
+        size_t sizeof_data,
+        uint32_t memory_index)
+    {
+        device_buffer b;
+
+        // Create buffer object
+        vk::BufferCreateInfo buffer_create_info;
+        buffer_create_info.size = sizeof_data;
+        buffer_create_info.usage = flags;
+        buffer_create_info.sharingMode = vk::SharingMode::eExclusive;
+        b.buffer = m_device.createBuffer(buffer_create_info, nullptr, m_dispatch);
+
+        // Allocate memory for the buffer object.
+        vk::MemoryRequirements buffer_mem_reqs = m_device.getBufferMemoryRequirements(b.buffer, m_dispatch);
+
+        vk::MemoryAllocateInfo buffer_alloc_info;
+        buffer_alloc_info.allocationSize = buffer_mem_reqs.size;
+        buffer_alloc_info.memoryTypeIndex = memory_index;
+        b.device_memory = m_device.allocateMemory(buffer_alloc_info, nullptr, m_dispatch);
+        m_device.bindBufferMemory(b.buffer, b.device_memory, 0, m_dispatch);
+
+        return (b);
+    }
+
+    void application::cleanup_device_buffer(device_buffer& b)
+    {
+        m_device.destroyBuffer(b.buffer, nullptr, m_dispatch);
+        m_device.freeMemory(b.device_memory, nullptr, m_dispatch);
     }
 
     int application::run(int, char*[])
@@ -1201,12 +1346,14 @@ namespace gtb {
 
         // Get the next image to render to from the swap chain.
         m_device.resetFences(m_image_ready, m_dispatch);
-        uint32_t aquired_image = m_device.acquireNextImageKHR(m_swap_chain, infinite_wait, vk::Semaphore(), m_image_ready, m_dispatch).value;
+        uint32_t acquired_image = m_device.acquireNextImageKHR(m_swap_chain, infinite_wait, vk::Semaphore(), m_image_ready, m_dispatch).value;
         // TODO: Deal with suboptimal or out-of-date swapchains
 
         // Get command buffers objects associated with this image.
-        vk::CommandBuffer& command_buffer(m_command_buffers[aquired_image]);
-        vk::Fence& command_fence(m_command_fences[aquired_image]);
+        vk::CommandBuffer& command_buffer(m_command_buffers[acquired_image]);
+        vk::Fence& command_fence(m_command_fences[acquired_image]);
+        device_buffer& uniform_buffer(m_uniform_buffers[acquired_image]);
+        vk::DescriptorSet& descriptor_set(m_simple_descriptor_sets[acquired_image]);
 
         // Wait for the commands complete fence in order to record.
         m_device.waitForFences(command_fence, VK_FALSE, infinite_wait, m_dispatch);
@@ -1224,14 +1371,48 @@ namespace gtb {
 
         vk::RenderPassBeginInfo pass_begin_info;
         pass_begin_info.renderPass = m_simple_render_pass;
-        pass_begin_info.framebuffer = m_simple_framebuffers[aquired_image];
+        pass_begin_info.framebuffer = m_simple_framebuffers[acquired_image];
         pass_begin_info.renderArea.offset = vk::Offset2D(0, 0);
         pass_begin_info.renderArea.extent = m_swap_chain_extent;
         pass_begin_info.clearValueCount = 1;
         pass_begin_info.pClearValues = &clear_to_black;
         command_buffer.beginRenderPass(pass_begin_info, vk::SubpassContents::eInline, m_dispatch);
 
-        // TODO: draw
+        // Generate commands for per-frame but not per-draw work.
+        command_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, m_simple_pipeline, m_dispatch);
+
+        // Setup to write the uniform buffer.
+        uint8_t* ubo_data = reinterpret_cast<uint8_t*>(m_device.mapMemory(uniform_buffer.device_memory, 0, ubo_size, vk::MemoryMapFlags(), m_dispatch));
+        uint32_t ubo_offset = 0;
+
+        // Do all of the per-draw work.
+        for (draw_record& d : m_draws) {
+            // Bind geometry
+            vk::DeviceSize zero_offset = 0;
+            command_buffer.bindVertexBuffers(0, m_static_geometry_buffers[d.vbo].buffer, zero_offset, m_dispatch);
+            command_buffer.bindIndexBuffer(m_static_geometry_buffers[d.ibo].buffer, zero_offset, vk::IndexType::eUint16, m_dispatch);
+
+            // Fill out and bind uniform buffer.
+            uint32_t dynamic_ubo_offsets[2];
+
+            // Update transform UBO field.
+            *reinterpret_cast<glm::mat4*>(ubo_data + ubo_offset) = d.transform;
+            dynamic_ubo_offsets[0] = ubo_offset;
+            ubo_offset = align_up(ubo_offset + sizeof(glm::mat4), m_ubo_min_field_align);
+
+            // Update color UBO field.
+            *reinterpret_cast<glm::vec3*>(ubo_data + ubo_offset) = d.color;
+            dynamic_ubo_offsets[1] = ubo_offset;
+            ubo_offset = align_up(ubo_offset + sizeof(glm::vec3), m_ubo_min_field_align);
+
+            command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, m_simple_pipeline_layout, 0, 1, &descriptor_set, _countof(dynamic_ubo_offsets), dynamic_ubo_offsets, m_dispatch);
+
+            // Draw
+            command_buffer.drawIndexed(d.index_count, 1, d.first_index, d.vertex_offset, 0, m_dispatch);
+        }
+
+        // Finish command buffer recording.
+        m_device.unmapMemory(uniform_buffer.device_memory, m_dispatch);
 
         command_buffer.endRenderPass(m_dispatch);
         command_buffer.end(m_dispatch);
@@ -1239,17 +1420,17 @@ namespace gtb {
         // Now we need our aquired image to actually be ready.
         m_device.waitForFences(m_image_ready, VK_FALSE, infinite_wait, m_dispatch);
 
-        // Submit work
+        // Submit work.
         vk::SubmitInfo submit_info;
         submit_info.commandBufferCount = 1;
         submit_info.pCommandBuffers = &command_buffer;
         m_queue.submit(submit_info, command_fence, m_dispatch);
 
-        // Present the texture
+        // Present the texture.
         vk::PresentInfoKHR present_info;
         present_info.swapchainCount = 1;
         present_info.pSwapchains = &m_swap_chain;
-        present_info.pImageIndices = &aquired_image;
+        present_info.pImageIndices = &acquired_image;
         m_queue.presentKHR(present_info, m_dispatch);
     }
 
@@ -1289,6 +1470,15 @@ namespace gtb {
     {
         application* app = static_cast<application*>(user_data);
 
+        app; //app->m_log_stream
+
+        error::dbg_out
+            << "Vulkan debug report:" << std::endl
+            << " Flags = " << vk::to_string(vk::DebugReportFlagBitsEXT(flags)) << std::endl
+            << " Object Type = " << vk::to_string(vk::ObjectType(object_type)) << std::endl
+            << " Layer Prefix = " << layer_prefix << std::endl
+            << " Message = " << message << std::endl;
+
         if (flags & VK_DEBUG_REPORT_ERROR_BIT_EXT) {
             BOOST_THROW_EXCEPTION(error::vk_debug_report_error()
                 << error::errinfo_vk_debug_report_error_object_type(vk::to_string(vk::ObjectType(object_type)).c_str())
@@ -1297,14 +1487,6 @@ namespace gtb {
                 << error::errinfo_vk_debug_report_error_message_code(message_code)
                 << error::errinfo_vk_debug_report_error_layer_prefix(layer_prefix)
                 << error::errinfo_vk_debug_report_error_message(message));
-        }
-        else {
-            app->m_log_stream
-                << "Vulkan debug report:" << std::endl
-                << " Flags = " << vk::to_string(vk::DebugReportFlagBitsEXT(flags)) << std::endl
-                << " Object Type = " << vk::to_string(vk::ObjectType(object_type)) << std::endl
-                << " Layer Prefix = " << layer_prefix << std::endl
-                << " Message = " << message << std::endl;
         }
 
         return (VK_FALSE);

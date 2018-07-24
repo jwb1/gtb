@@ -7,16 +7,17 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="gtb\glfw_dispatch_loader.hpp" />
+    <ClInclude Include="gtb\dbg_out.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="gtb\gtb.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="gtb\simple.frag">
+    <CustomBuild Include="gtb\simple.frag">
       <Filter>shaders</Filter>
-    </None>
-    <None Include="gtb\simple.vert">
+    </CustomBuild>
+    <CustomBuild Include="gtb\simple.vert">
       <Filter>shaders</Filter>
-    </None>
+    </CustomBuild>
   </ItemGroup>
 </Project>
