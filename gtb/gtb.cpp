@@ -13,8 +13,24 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 
-// C++ Standard Library
 #define _CRT_SECURE_NO_WARNINGS
+
+#if (GTB_BUILD_TYPE == 1)
+#define GTB_BUILD_DEBUG
+#elif (GTB_BUILD_TYPE == 2)
+#define GTB_BUILD_TYPE_RELEASE
+#else
+#error Unknown GTB_BUILD_TYPE
+#endif
+
+#ifdef GTB_BUILD_DEBUG
+#define GTB_ENABLE_VULKAN_DEBUG_LAYER
+#endif
+
+// Compiler intrinsics
+#include <intrin.h>
+
+// C++ Standard Library
 #include <cstdlib>
 #include <cmath>
 #include <cfenv>
@@ -37,11 +53,14 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
-// GLM
 #if defined(_MSC_VER)
 #pragma warning (push)
-#pragma warning (disable : 4201) // warning C4201 : nonstandard extension used : nameless struct / union
+#pragma warning (disable : 4201) // nonstandard extension used : nameless struct / union
+#pragma warning (disable : 4458) // declaration hides class member
+#pragma warning (disable : 4701) // potentially uninitialized local variable used
 #endif
+
+// GLM
 #define GLM_FORCE_SWIZZLE
 #define GLM_FORCE_AVX
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
@@ -49,6 +68,10 @@
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
 #include <glm/gtx/transform.hpp>
+
+// GLI
+#include <gli/gli.hpp>
+
 #if defined(_MSC_VER)
 #pragma warning (pop)
 #endif
@@ -56,8 +79,6 @@
 // Local helper classes
 #include "gtb/glfw_dispatch_loader.hpp"
 #include "gtb/dbg_out.hpp"
-
-#define GTB_ENABLE_VULKAN_DEBUG_LAYER
 
 /*
 ~~ Math Conventions ~~
@@ -256,7 +277,11 @@ namespace gtb {
     };
 
     class application {
-        static constexpr uint32_t ubo_size = 65535;
+        static constexpr uint32_t per_frame_ubo_size = 65535;
+
+        static const vk::MemoryPropertyFlags ubo_memory_properties;
+        static const vk::MemoryPropertyFlags staging_memory_properties;
+        static const vk::MemoryPropertyFlags optimized_memory_properties;
 
         // Logging
         std::ofstream m_log_stream;
@@ -284,17 +309,6 @@ namespace gtb {
 
         // Graphics memory
         vk::PhysicalDeviceMemoryProperties m_memory_properties;
-        struct memory_types {
-            static constexpr uint32_t invalid = std::numeric_limits<uint32_t>::max();
-
-            uint32_t staging;
-            uint32_t optimized;
-
-            memory_types()
-                : staging(invalid)
-                , optimized(invalid)
-            {}
-        } m_memory_types;
 
         // Shaders
         vk::ShaderModule m_simple_vert;
@@ -303,6 +317,9 @@ namespace gtb {
         // Render pass and targets
         vk::RenderPass m_simple_render_pass;
         std::vector<vk::Framebuffer> m_simple_framebuffers;
+
+        // Sampler objects
+        vk::Sampler m_bilinear_sampler;
 
         // Pipelines
         vk::DescriptorSetLayout m_simple_descriptor_set_layout;
@@ -330,6 +347,17 @@ namespace gtb {
         // Geometry objects
         device_buffer_vector m_static_geometry_buffers;
 
+        // Texture objects
+        struct device_texture {
+            vk::Image image;
+            vk::DeviceMemory device_memory;
+            vk::ImageView view;
+        };
+        typedef std::vector<device_texture> device_texture_vector;
+
+        device_texture_vector m_textures;
+
+        // Draw list
         struct draw_record {
             glm::mat4 transform;
             glm::vec3 color;
@@ -339,6 +367,7 @@ namespace gtb {
             int32_t vertex_offset;
             uint8_t vbo;
             uint8_t ibo;
+            uint8_t texture;
         };
         typedef std::vector<draw_record> draw_vector;
         draw_vector m_draws;
@@ -388,6 +417,9 @@ namespace gtb {
             const char* message,
             void* user_data);
 
+        // Graphics memory
+        uint32_t get_memory_type(uint32_t allowed_types, vk::MemoryPropertyFlags desired_memory_properties);
+
         // Shaders
         void shaders_init();
         void shaders_cleanup();
@@ -395,6 +427,10 @@ namespace gtb {
         // Render pass and targets
         void render_pass_init();
         void render_pass_cleanup();
+
+        // Samplers
+        void sampler_init();
+        void sampler_cleanup();
 
         // Pipelines
         void pipeline_init();
@@ -407,18 +443,27 @@ namespace gtb {
         // Built-in objects
         void builtin_init();
 
+        // Command buffers
+        vk::CommandBuffer create_one_time_command_buffer();
+        void finish_one_time_command_buffer(vk::CommandBuffer cmd_buffer);
+        void cleanup_one_time_command_buffer(vk::CommandBuffer cmd_buffer);
+
         // Buffers
         device_buffer_vector::iterator create_static_geometry_buffer(
             vk::BufferUsageFlags flags,
             const void* data,
             size_t sizeof_data);
-        void static_geometry_buffer_cleanup();
+        void static_geometry_buffers_cleanup();
 
         device_buffer create_device_buffer(
             vk::BufferUsageFlags flags,
             size_t sizeof_data,
-            uint32_t memory_index);
+            vk::MemoryPropertyFlags memory_properties);
         void cleanup_device_buffer(device_buffer& b);
+
+        // Textures
+        device_texture_vector::iterator create_texture(const std::string& file_name);
+        void textures_cleanup();
 
         // Disallow some C++ operations.
         application(application&&) = delete;
@@ -426,6 +471,15 @@ namespace gtb {
         application& operator=(application&&) = delete;
         application& operator=(const application&) = delete;
     };
+
+    // static
+    const vk::MemoryPropertyFlags application::ubo_memory_properties = vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent;
+
+    // static
+    const vk::MemoryPropertyFlags application::staging_memory_properties = vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent;
+
+    // static
+    const vk::MemoryPropertyFlags application::optimized_memory_properties = vk::MemoryPropertyFlagBits::eDeviceLocal;
 
     // static
     application* application::get()
@@ -448,6 +502,7 @@ namespace gtb {
         vk_init();
         shaders_init();
         render_pass_init();
+        sampler_init();
         per_frame_init();
         pipeline_init();
 
@@ -461,9 +516,11 @@ namespace gtb {
             m_device.waitIdle(m_dispatch);
         }
 
-        static_geometry_buffer_cleanup();
+        textures_cleanup();
+        static_geometry_buffers_cleanup();
         pipeline_cleanup();
         per_frame_cleanup();
+        sampler_cleanup();
         render_pass_cleanup();
         shaders_cleanup();
         vk_cleanup();
@@ -755,30 +812,9 @@ namespace gtb {
                 << error::errinfo_capability_description("No Vulkan physical devices meets requirements."));
         }
 
-        // Select memory types for all of the allocations we need to do.
+        // Need some device-specific info.
         m_memory_properties = m_physical_device.getMemoryProperties(d);
 
-        for (uint32_t mem_type = 0; mem_type < m_memory_properties.memoryTypeCount; ++mem_type) {
-            const vk::MemoryPropertyFlags staging_flags = vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent;
-            if (((m_memory_properties.memoryTypes[mem_type].propertyFlags & staging_flags) == staging_flags) &&
-                (m_memory_types.staging == memory_types::invalid)) {
-                m_memory_types.staging = mem_type;
-            }
-
-            const vk::MemoryPropertyFlags optimized_flags = vk::MemoryPropertyFlagBits::eDeviceLocal;
-            if (((m_memory_properties.memoryTypes[mem_type].propertyFlags & optimized_flags) == optimized_flags) &&
-                (m_memory_types.optimized == memory_types::invalid)) {
-                m_memory_types.optimized = mem_type;
-            }
-        }
-
-        if (m_memory_types.staging == memory_types::invalid ||
-            m_memory_types.optimized == memory_types::invalid) {
-            BOOST_THROW_EXCEPTION(error::capability_exception()
-                << error::errinfo_capability_description("Could not find all needed memory types."));
-        }
-
-        // Need some device-specific info.
         vk::PhysicalDeviceProperties device_props = m_physical_device.getProperties(d);
         m_ubo_min_field_align = static_cast<uint32_t>(device_props.limits.minUniformBufferOffsetAlignment);
 
@@ -956,6 +992,25 @@ namespace gtb {
         }
     }
 
+    void application::sampler_init()
+    {
+        vk::SamplerCreateInfo sampler_create_info;
+        sampler_create_info.magFilter = vk::Filter::eLinear;
+        sampler_create_info.minFilter = vk::Filter::eLinear;
+        sampler_create_info.mipmapMode = vk::SamplerMipmapMode::eNearest;
+        sampler_create_info.addressModeU = vk::SamplerAddressMode::eRepeat;
+        sampler_create_info.addressModeV = vk::SamplerAddressMode::eRepeat;
+        sampler_create_info.addressModeW = vk::SamplerAddressMode::eRepeat;
+        m_bilinear_sampler = m_device.createSampler(sampler_create_info, nullptr, m_dispatch);
+    }
+
+    void application::sampler_cleanup()
+    {
+        if (m_bilinear_sampler) {
+            m_device.destroySampler(m_bilinear_sampler, nullptr, m_dispatch);
+        }
+    }
+
     void application::per_frame_init()
     {
         // Command pool is the allocator wrapper.
@@ -976,18 +1031,21 @@ namespace gtb {
         // Need a uniform buffer per frame in flight as well.
         m_uniform_buffers.reserve(frames_in_flight);
         for (uint32_t i = 0; i < frames_in_flight; ++i) {
-            m_uniform_buffers.emplace_back(create_device_buffer(vk::BufferUsageFlagBits::eUniformBuffer, ubo_size, m_memory_types.staging));
+            m_uniform_buffers.emplace_back(create_device_buffer(vk::BufferUsageFlagBits::eUniformBuffer, per_frame_ubo_size, ubo_memory_properties));
         }
 
         // Descriptors help us bind uniform buffer memory. Need a pool object to allocate them.
-        vk::DescriptorPoolSize descriptor_pool_size;
-        descriptor_pool_size.type = vk::DescriptorType::eUniformBufferDynamic;
-        descriptor_pool_size.descriptorCount = frames_in_flight * 2;
+        vk::DescriptorPoolSize descriptor_pool_sizes[2];
+        descriptor_pool_sizes[0].type = vk::DescriptorType::eUniformBufferDynamic;
+        descriptor_pool_sizes[0].descriptorCount = frames_in_flight * 2;
+
+        descriptor_pool_sizes[1].type = vk::DescriptorType::eCombinedImageSampler;
+        descriptor_pool_sizes[1].descriptorCount = frames_in_flight * 1;
 
         vk::DescriptorPoolCreateInfo descriptor_pool_create_info;
         descriptor_pool_create_info.maxSets = frames_in_flight;
-        descriptor_pool_create_info.poolSizeCount = 1;
-        descriptor_pool_create_info.pPoolSizes = &descriptor_pool_size;
+        descriptor_pool_create_info.poolSizeCount = _countof(descriptor_pool_sizes);
+        descriptor_pool_create_info.pPoolSizes = descriptor_pool_sizes;
 
         m_descriptor_pool = m_device.createDescriptorPool(descriptor_pool_create_info, nullptr, m_dispatch);
 
@@ -1117,7 +1175,7 @@ namespace gtb {
         blend_create_info.pAttachments = &color_blend_attachment;
 
         // UBO layout.
-        vk::DescriptorSetLayoutBinding set_layout_bindings[2];
+        vk::DescriptorSetLayoutBinding set_layout_bindings[3];
         set_layout_bindings[0].binding = 0;
         set_layout_bindings[0].descriptorType = vk::DescriptorType::eUniformBufferDynamic;
         set_layout_bindings[0].descriptorCount = 1;
@@ -1127,6 +1185,11 @@ namespace gtb {
         set_layout_bindings[1].descriptorType = vk::DescriptorType::eUniformBufferDynamic;
         set_layout_bindings[1].descriptorCount = 1;
         set_layout_bindings[1].stageFlags = vk::ShaderStageFlagBits::eFragment;
+
+        set_layout_bindings[2].binding = 2;
+        set_layout_bindings[2].descriptorType = vk::DescriptorType::eCombinedImageSampler;
+        set_layout_bindings[2].descriptorCount = 1;
+        set_layout_bindings[2].stageFlags = vk::ShaderStageFlagBits::eFragment;
 
         vk::DescriptorSetLayoutCreateInfo set_layout_create_info;
         set_layout_create_info.bindingCount = _countof(set_layout_bindings);
@@ -1217,23 +1280,63 @@ namespace gtb {
             { { 1.0f, 1.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f } },
             { { 1.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 0.0f } }
         };
-        device_buffer_vector::iterator quad_vbo = create_static_geometry_buffer(
+        device_buffer_vector::iterator quad_vbo(create_static_geometry_buffer(
             vk::BufferUsageFlagBits::eVertexBuffer,
             quad_verts,
-            sizeof(quad_verts));
+            sizeof(quad_verts)));
         uint8_t vbo_index = static_cast<uint8_t>(quad_vbo - m_static_geometry_buffers.begin());
 
         static const uint16_t quad_indices[] = {
             0, 1, 3,
             1, 2, 3
         };
-        device_buffer_vector::iterator quad_ibo = create_static_geometry_buffer(
+        device_buffer_vector::iterator quad_ibo(create_static_geometry_buffer(
             vk::BufferUsageFlagBits::eIndexBuffer,
             quad_indices,
-            sizeof(quad_indices));
+            sizeof(quad_indices)));
         uint8_t ibo_index = static_cast<uint8_t>(quad_ibo - m_static_geometry_buffers.begin());
 
-        m_draws.push_back({ glm::scale(glm::vec3(0.75f, 0.75f, 1.0f)), glm::vec3(1.0f, 0.0f, 0.0f), 6, 0, 0, vbo_index, ibo_index });
+        // Textures
+        device_texture_vector::iterator quad_tex(create_texture("kueken7_rgba8_srgb.dds"));
+        uint8_t tex_index = static_cast<uint8_t>(quad_tex - m_textures.begin());
+
+        // Draw list
+        // TODO: Temporary until we do model / scene loading.
+        m_draws.push_back({ glm::scale(glm::vec3(0.75f, 0.75f, 1.0f)), glm::vec3(1.0f, 0.0f, 0.0f), 6, 0, 0, vbo_index, ibo_index, tex_index });
+    }
+
+    vk::CommandBuffer application::create_one_time_command_buffer()
+    {
+        vk::CommandBufferAllocateInfo command_buffer_allocate_info;
+        command_buffer_allocate_info.commandPool = m_command_pool;
+        command_buffer_allocate_info.level = vk::CommandBufferLevel::ePrimary;
+        command_buffer_allocate_info.commandBufferCount = 1;
+        vk::CommandBuffer one_time_command_buffer = m_device.allocateCommandBuffers(command_buffer_allocate_info, m_dispatch)[0];
+
+        vk::CommandBufferBeginInfo begin_info;
+        begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+        one_time_command_buffer.begin(begin_info, m_dispatch);
+
+        return (one_time_command_buffer);
+    }
+
+    void application::finish_one_time_command_buffer(vk::CommandBuffer cmd_buffer)
+    {
+        cmd_buffer.end(m_dispatch);
+
+        // Submit the command buffer.
+        vk::SubmitInfo submit_info;
+        submit_info.commandBufferCount = 1;
+        submit_info.pCommandBuffers = &cmd_buffer;
+        m_queue.submit(submit_info, nullptr, m_dispatch);
+
+        // Finish it by waiting for queue idle.
+        m_queue.waitIdle(m_dispatch);
+    }
+
+    void application::cleanup_one_time_command_buffer(vk::CommandBuffer cmd_buffer)
+    {
+        m_device.freeCommandBuffers(m_command_pool, cmd_buffer, m_dispatch);
     }
 
     application::device_buffer_vector::iterator application::create_static_geometry_buffer(
@@ -1242,7 +1345,7 @@ namespace gtb {
         size_t sizeof_data)
     {
         // Need a staging buffer to upload the data from.
-        device_buffer staging_buffer = create_device_buffer(vk::BufferUsageFlagBits::eTransferSrc, sizeof_data, m_memory_types.staging);
+        device_buffer staging_buffer = create_device_buffer(vk::BufferUsageFlagBits::eTransferSrc, sizeof_data, staging_memory_properties);
 
         // Write the data to the staging buffer.
         void* mapped_staging_memory = m_device.mapMemory(staging_buffer.device_memory, 0, sizeof_data, vk::MemoryMapFlags(), m_dispatch);
@@ -1250,43 +1353,27 @@ namespace gtb {
         m_device.unmapMemory(staging_buffer.device_memory, m_dispatch);
 
         // Optimized buffer for actual GPU use.
-        device_buffer optimized_buffer = create_device_buffer(flags | vk::BufferUsageFlagBits::eTransferDst, sizeof_data, m_memory_types.optimized);
+        device_buffer optimized_buffer = create_device_buffer(flags | vk::BufferUsageFlagBits::eTransferDst, sizeof_data, optimized_memory_properties);
 
         // Record a command buffer to copy the staging buffer to the optimized buffer.
-        vk::CommandBufferAllocateInfo command_buffer_allocate_info;
-        command_buffer_allocate_info.commandPool = m_command_pool;
-        command_buffer_allocate_info.level = vk::CommandBufferLevel::ePrimary;
-        command_buffer_allocate_info.commandBufferCount = 1;
-        vk::CommandBuffer copy_command_buffer = m_device.allocateCommandBuffers(command_buffer_allocate_info, m_dispatch)[0];
-
-        vk::CommandBufferBeginInfo begin_info;
-        begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
-        copy_command_buffer.begin(begin_info, m_dispatch);
+        vk::CommandBuffer copy_command_buffer = create_one_time_command_buffer();
 
         vk::BufferCopy copy_region;
         copy_region.size = sizeof_data;
         copy_command_buffer.copyBuffer(staging_buffer.buffer, optimized_buffer.buffer, copy_region, m_dispatch);
 
-        copy_command_buffer.end(m_dispatch);
-
-        // Submit the copy.
-        vk::SubmitInfo submit_info;
-        submit_info.commandBufferCount = 1;
-        submit_info.pCommandBuffers = &copy_command_buffer;
-        m_queue.submit(submit_info, nullptr, m_dispatch);
-
-        // TODO: Rather than wait here, wait at the end of the application constructor; will need to
+        // TODO: Rather than finish here, we could wait at the end of the application constructor; will need to
         // remember staging details to be freed there.
-        m_queue.waitIdle(m_dispatch);
+        finish_one_time_command_buffer(copy_command_buffer);
 
         // Cleanup.
-        m_device.freeCommandBuffers(m_command_pool, copy_command_buffer, m_dispatch);
+        cleanup_one_time_command_buffer(copy_command_buffer);
         cleanup_device_buffer(staging_buffer);
 
         return (m_static_geometry_buffers.emplace(m_static_geometry_buffers.end(), optimized_buffer));
     }
 
-    void application::static_geometry_buffer_cleanup()
+    void application::static_geometry_buffers_cleanup()
     {
         for (device_buffer& b : m_static_geometry_buffers) {
             cleanup_device_buffer(b);
@@ -1296,7 +1383,7 @@ namespace gtb {
     application::device_buffer application::create_device_buffer(
         vk::BufferUsageFlags flags,
         size_t sizeof_data,
-        uint32_t memory_index)
+        vk::MemoryPropertyFlags memory_properties)
     {
         device_buffer b;
 
@@ -1312,7 +1399,7 @@ namespace gtb {
 
         vk::MemoryAllocateInfo buffer_alloc_info;
         buffer_alloc_info.allocationSize = buffer_mem_reqs.size;
-        buffer_alloc_info.memoryTypeIndex = memory_index;
+        buffer_alloc_info.memoryTypeIndex = get_memory_type(buffer_mem_reqs.memoryTypeBits, memory_properties);
         b.device_memory = m_device.allocateMemory(buffer_alloc_info, nullptr, m_dispatch);
         m_device.bindBufferMemory(b.buffer, b.device_memory, 0, m_dispatch);
 
@@ -1323,6 +1410,158 @@ namespace gtb {
     {
         m_device.destroyBuffer(b.buffer, nullptr, m_dispatch);
         m_device.freeMemory(b.device_memory, nullptr, m_dispatch);
+    }
+
+    application::device_texture_vector::iterator application::create_texture(const std::string& file_name)
+    {
+        gli::texture gli_texture(gli::load(file_name));
+        if (gli_texture.empty()) {
+            BOOST_THROW_EXCEPTION(error::file_exception()
+                << error::errinfo_file_exception_file(file_name.c_str()));
+        }
+
+        // Need a staging buffer to upload the data from.
+        device_buffer staging_buffer = create_device_buffer(vk::BufferUsageFlagBits::eTransferSrc, gli_texture.size(), staging_memory_properties);
+
+        // Write the data to the staging buffer.
+        void* mapped_staging_memory = m_device.mapMemory(staging_buffer.device_memory, 0, gli_texture.size(), vk::MemoryMapFlags(), m_dispatch);
+        memcpy(mapped_staging_memory, gli_texture.data(), gli_texture.size());
+        m_device.unmapMemory(staging_buffer.device_memory, m_dispatch);
+
+        // Create a backing image.
+        device_texture optimized_texture;
+        gli::extent3d gli_texture_extent(gli_texture.extent());
+
+        vk::ImageCreateInfo image_create_info;
+        switch (gli_texture.target()) {
+        case gli::TARGET_1D:
+        case gli::TARGET_1D_ARRAY:
+            break;
+
+        case gli::TARGET_2D:
+            image_create_info.imageType = vk::ImageType::e2D;
+            image_create_info.extent.width = gli_texture_extent.x;
+            image_create_info.extent.height = gli_texture_extent.y;
+            image_create_info.extent.depth = 1;
+            image_create_info.mipLevels = static_cast<uint32_t>(gli_texture.levels());
+            image_create_info.arrayLayers = 1;
+            break;
+
+        case gli::TARGET_2D_ARRAY:
+        case gli::TARGET_3D:
+        case gli::TARGET_RECT:
+        case gli::TARGET_RECT_ARRAY:
+        case gli::TARGET_CUBE:
+        case gli::TARGET_CUBE_ARRAY:
+            break;
+        }
+
+        image_create_info.format = static_cast<vk::Format>(gli_texture.format());
+        image_create_info.tiling = vk::ImageTiling::eOptimal;
+        image_create_info.initialLayout = vk::ImageLayout::eUndefined;
+        image_create_info.usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst;
+        image_create_info.sharingMode = vk::SharingMode::eExclusive;
+        image_create_info.samples = vk::SampleCountFlagBits::e1;
+
+        optimized_texture.image = m_device.createImage(image_create_info, nullptr, m_dispatch);
+
+        // Allocate memory for the image object.
+        vk::MemoryRequirements image_mem_reqs = m_device.getImageMemoryRequirements(optimized_texture.image, m_dispatch);
+
+        vk::MemoryAllocateInfo image_alloc_info;
+        image_alloc_info.allocationSize = image_mem_reqs.size;
+        image_alloc_info.memoryTypeIndex = get_memory_type(image_mem_reqs.memoryTypeBits, optimized_memory_properties);
+        optimized_texture.device_memory = m_device.allocateMemory(image_alloc_info, nullptr, m_dispatch);
+        m_device.bindImageMemory(optimized_texture.image, optimized_texture.device_memory, 0, m_dispatch);
+
+        // Create a image view to access the image through.
+        vk::ImageSubresourceRange subresource_range;
+        subresource_range.aspectMask = vk::ImageAspectFlagBits::eColor;
+        subresource_range.baseMipLevel = 0;
+        subresource_range.levelCount = static_cast<uint32_t>(gli_texture.levels());
+        subresource_range.baseArrayLayer = 0;
+        subresource_range.layerCount = static_cast<uint32_t>(gli_texture.layers());
+
+        vk::ImageViewCreateInfo image_view_create_info;
+        image_view_create_info.image = optimized_texture.image;
+        image_view_create_info.viewType = vk::ImageViewType::e2D;
+        image_view_create_info.format = image_create_info.format;
+        image_view_create_info.subresourceRange = subresource_range;
+
+        optimized_texture.view = m_device.createImageView(image_view_create_info, nullptr, m_dispatch);
+
+        // Record a command buffer to copy the staging buffer to the optimized image.
+        vk::CommandBuffer copy_command_buffer = create_one_time_command_buffer();
+
+        vk::ImageMemoryBarrier start_barrier;
+        start_barrier.srcAccessMask = vk::AccessFlags();
+        start_barrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+        start_barrier.oldLayout = vk::ImageLayout::eUndefined;
+        start_barrier.newLayout = vk::ImageLayout::eTransferDstOptimal;
+        start_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        start_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        start_barrier.image = optimized_texture.image;
+        start_barrier.subresourceRange = subresource_range;
+        copy_command_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlags(), 0, nullptr, 0, nullptr, 1, &start_barrier, m_dispatch);
+
+        vk::BufferImageCopy copy_image_region;
+        copy_image_region.bufferOffset = 0;
+        copy_image_region.bufferRowLength = 0;
+        copy_image_region.bufferImageHeight = 0;
+        copy_image_region.imageSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
+        copy_image_region.imageSubresource.mipLevel = 0;
+        copy_image_region.imageSubresource.baseArrayLayer = 0;
+        copy_image_region.imageSubresource.layerCount = static_cast<uint32_t>(gli_texture.layers());
+        copy_image_region.imageOffset = { 0, 0, 0 };
+        copy_image_region.imageExtent = image_create_info.extent;
+        copy_command_buffer.copyBufferToImage(staging_buffer.buffer, optimized_texture.image, vk::ImageLayout::eTransferDstOptimal, copy_image_region, m_dispatch);
+
+        vk::ImageMemoryBarrier end_barrier;
+        end_barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+        end_barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
+        end_barrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
+        end_barrier.newLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+        end_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        end_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        end_barrier.image = optimized_texture.image;
+        end_barrier.subresourceRange = subresource_range;
+        copy_command_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eFragmentShader, vk::DependencyFlags(), 0, nullptr, 0, nullptr, 1, &end_barrier, m_dispatch);
+
+        // TODO: Rather than finish here, we could wait at the end of the application constructor; will need to
+        // remember staging details to be freed there.
+        finish_one_time_command_buffer(copy_command_buffer);
+
+        // Cleanup.
+        cleanup_one_time_command_buffer(copy_command_buffer);
+        cleanup_device_buffer(staging_buffer);
+
+        return (m_textures.emplace(m_textures.end(), optimized_texture));
+    }
+
+    void application::textures_cleanup()
+    {
+        for (device_texture& t : m_textures) {
+            m_device.destroyImageView(t.view, nullptr, m_dispatch);
+            m_device.destroyImage(t.image, nullptr, m_dispatch);
+            m_device.freeMemory(t.device_memory, nullptr, m_dispatch);
+        }
+    }
+
+    uint32_t application::get_memory_type(uint32_t allowed_types, vk::MemoryPropertyFlags desired_memory_properties)
+    {
+        unsigned long mem_type = 0;
+
+        while (_BitScanForward(&mem_type, allowed_types)) {
+            if ((m_memory_properties.memoryTypes[mem_type].propertyFlags & desired_memory_properties) == desired_memory_properties) {
+                return (mem_type);
+            }
+            else {
+                allowed_types &= ~(1 << mem_type);
+            }
+        }
+
+        BOOST_THROW_EXCEPTION(error::capability_exception()
+            << error::errinfo_capability_description("Could not find needed memory type."));
     }
 
     int application::run(int, char*[])
@@ -1382,7 +1621,7 @@ namespace gtb {
         command_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, m_simple_pipeline, m_dispatch);
 
         // Setup to write the uniform buffer.
-        uint8_t* ubo_data = reinterpret_cast<uint8_t*>(m_device.mapMemory(uniform_buffer.device_memory, 0, ubo_size, vk::MemoryMapFlags(), m_dispatch));
+        uint8_t* ubo_data = reinterpret_cast<uint8_t*>(m_device.mapMemory(uniform_buffer.device_memory, 0, per_frame_ubo_size, vk::MemoryMapFlags(), m_dispatch));
         uint32_t ubo_offset = 0;
 
         // Do all of the per-draw work.
@@ -1391,6 +1630,22 @@ namespace gtb {
             vk::DeviceSize zero_offset = 0;
             command_buffer.bindVertexBuffers(0, m_static_geometry_buffers[d.vbo].buffer, zero_offset, m_dispatch);
             command_buffer.bindIndexBuffer(m_static_geometry_buffers[d.ibo].buffer, zero_offset, vk::IndexType::eUint16, m_dispatch);
+
+            // Bind Texture
+            vk::DescriptorImageInfo descriptor_image_info[1];
+            vk::WriteDescriptorSet write_descriptor_set[1];
+
+            descriptor_image_info[0].sampler = m_bilinear_sampler;
+            descriptor_image_info[0].imageView = m_textures[d.texture].view;
+            descriptor_image_info[0].imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+
+            write_descriptor_set[0].dstSet = descriptor_set;
+            write_descriptor_set[0].dstBinding = 2;
+            write_descriptor_set[0].descriptorType = vk::DescriptorType::eCombinedImageSampler;
+            write_descriptor_set[0].descriptorCount = 1;
+            write_descriptor_set[0].pImageInfo = &descriptor_image_info[0];
+
+            m_device.updateDescriptorSets(_countof(write_descriptor_set), write_descriptor_set, 0, nullptr, m_dispatch);
 
             // Fill out and bind uniform buffer.
             uint32_t dynamic_ubo_offsets[2];
