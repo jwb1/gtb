@@ -7,3 +7,6 @@
 [submodule "modules/boost"]
 	path = modules/boost
 	url = https://github.com/boostorg/boost.git
+[submodule "modules/gli"]
+	path = modules/gli
+	url = https://github.com/jwb1/gli.git
