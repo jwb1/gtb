@@ -283,6 +283,19 @@ namespace gtb {
         static const vk::MemoryPropertyFlags staging_memory_properties;
         static const vk::MemoryPropertyFlags optimized_memory_properties;
 
+        struct device_buffer {
+            vk::Buffer buffer;
+            vk::DeviceMemory device_memory;
+        };
+        typedef std::vector<device_buffer> device_buffer_vector;
+
+        struct device_image {
+            vk::Image image;
+            vk::DeviceMemory device_memory;
+            vk::ImageView view;
+        };
+        typedef std::vector<device_image> device_image_vector;
+
         // Logging
         std::ofstream m_log_stream;
 
@@ -300,12 +313,13 @@ namespace gtb {
 
         // Swap chain for display
         vk::SurfaceKHR m_surface;
-        vk::Format m_swap_chain_format;
+        vk::Format m_swap_chain_color_format;
+        vk::Format m_swap_chain_depth_format;
         vk::Extent2D m_swap_chain_extent;
         vk::SwapchainKHR m_swap_chain;
-        std::vector<vk::Image> m_swap_chain_images;
-        std::vector<vk::ImageView> m_swap_chain_views;
-        vk::Fence m_image_ready;
+        device_image_vector m_swap_chain_color_images;
+        device_image_vector m_swap_chain_depth_images;
+        vk::Fence m_next_image_ready;
 
         // Graphics memory
         vk::PhysicalDeviceMemoryProperties m_memory_properties;
@@ -332,13 +346,6 @@ namespace gtb {
         std::vector<vk::CommandBuffer> m_command_buffers;
         std::vector<vk::Fence> m_command_fences;
 
-        // Buffers.
-        struct device_buffer {
-            vk::Buffer buffer;
-            vk::DeviceMemory device_memory;
-        };
-        typedef std::vector<device_buffer> device_buffer_vector;
-
         // Uniform buffers
         uint32_t m_ubo_min_field_align;
         device_buffer_vector m_uniform_buffers;
@@ -348,14 +355,7 @@ namespace gtb {
         device_buffer_vector m_static_geometry_buffers;
 
         // Texture objects
-        struct device_texture {
-            vk::Image image;
-            vk::DeviceMemory device_memory;
-            vk::ImageView view;
-        };
-        typedef std::vector<device_texture> device_texture_vector;
-
-        device_texture_vector m_textures;
+        device_image_vector m_textures;
 
         // Draw list
         struct draw_record {
@@ -462,8 +462,10 @@ namespace gtb {
         void cleanup_device_buffer(device_buffer& b);
 
         // Textures
-        device_texture_vector::iterator create_texture(const std::string& file_name);
+        device_image_vector::iterator create_texture(const std::string& file_name);
         void textures_cleanup();
+
+        void cleanup_device_image(device_image& t);
 
         // Disallow some C++ operations.
         application(application&&) = delete;
@@ -593,12 +595,16 @@ namespace gtb {
 
     void application::vk_cleanup()
     {
-        if (m_image_ready) {
-            m_device.destroyFence(m_image_ready, nullptr, m_dispatch);
+        if (m_next_image_ready) {
+            m_device.destroyFence(m_next_image_ready, nullptr, m_dispatch);
         }
 
-        for (vk::ImageView &view : m_swap_chain_views) {
-            m_device.destroyImageView(view, nullptr, m_dispatch);
+        for (device_image& di : m_swap_chain_depth_images) {
+            cleanup_device_image(di);
+        }
+
+        for (device_image& ci : m_swap_chain_color_images) {
+            m_device.destroyImageView(ci.view, nullptr, m_dispatch);
         }
 
         if (m_swap_chain) {
@@ -773,7 +779,8 @@ namespace gtb {
             if (!found_surface_format) {
                 continue;
             }
-            m_swap_chain_format = vk::Format::eB8G8R8A8Unorm;
+            m_swap_chain_color_format = vk::Format::eB8G8R8A8Unorm;
+            m_swap_chain_depth_format = vk::Format::eD32Sfloat;
 
             // Looking for mailbox presentation for triple buffering.
             present_modes = physical_device.getSurfacePresentModesKHR(m_surface, d);
@@ -839,6 +846,12 @@ namespace gtb {
 
         // Get all of the queues in the family.
         m_queue = m_device.getQueue(m_queue_family_index, 0, m_dispatch);
+
+        // Command pool is the allocator wrapper.
+        vk::CommandPoolCreateInfo command_pool_create_info;
+        command_pool_create_info.flags = vk::CommandPoolCreateFlagBits::eTransient | vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
+        command_pool_create_info.queueFamilyIndex = m_queue_family_index;
+        m_command_pool = m_device.createCommandPool(command_pool_create_info, nullptr, m_dispatch);
     }
 
     void application::vk_create_swap_chain()
@@ -852,7 +865,7 @@ namespace gtb {
         vk::SwapchainCreateInfoKHR swap_chain_create_info;
         swap_chain_create_info.surface = m_surface;
         swap_chain_create_info.minImageCount = 3;
-        swap_chain_create_info.imageFormat = m_swap_chain_format;
+        swap_chain_create_info.imageFormat = m_swap_chain_color_format;
         swap_chain_create_info.imageColorSpace = vk::ColorSpaceKHR::eSrgbNonlinear;
         swap_chain_create_info.imageExtent = m_swap_chain_extent;
         swap_chain_create_info.imageArrayLayers = 1;
@@ -864,25 +877,92 @@ namespace gtb {
         m_swap_chain = m_device.createSwapchainKHR(swap_chain_create_info, nullptr, m_dispatch);
 
         // Get the images from the swap chain and create views to each.
-        m_swap_chain_images = m_device.getSwapchainImagesKHR(m_swap_chain, m_dispatch);
+        std::vector<vk::Image> swap_chain_color_images = m_device.getSwapchainImagesKHR(m_swap_chain, m_dispatch);
 
-        vk::ImageViewCreateInfo image_view_create_info;
-        image_view_create_info.viewType = vk::ImageViewType::e2D;
-        image_view_create_info.format = m_swap_chain_format;
-        image_view_create_info.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
-        image_view_create_info.subresourceRange.levelCount = 1;
-        image_view_create_info.subresourceRange.layerCount = 1;
+        // Templates of create info structs for each swap chain image
+        vk::ImageViewCreateInfo color_view_create_info;
+        color_view_create_info.viewType = vk::ImageViewType::e2D;
+        color_view_create_info.format = m_swap_chain_color_format;
+        color_view_create_info.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
+        color_view_create_info.subresourceRange.levelCount = 1;
+        color_view_create_info.subresourceRange.layerCount = 1;
 
-        m_swap_chain_views.reserve(m_swap_chain_images.size());
-        for (vk::Image &image : m_swap_chain_images) {
-            image_view_create_info.image = image;
-            m_swap_chain_views.emplace_back(m_device.createImageView(image_view_create_info, nullptr, m_dispatch));
+        vk::ImageCreateInfo depth_create_info;
+        depth_create_info.imageType = vk::ImageType::e2D;
+        depth_create_info.extent.width = m_swap_chain_extent.width;
+        depth_create_info.extent.height = m_swap_chain_extent.height;
+        depth_create_info.extent.depth = 1;
+        depth_create_info.mipLevels = 1;
+        depth_create_info.arrayLayers = 1;
+        depth_create_info.format = m_swap_chain_depth_format;
+        depth_create_info.tiling = vk::ImageTiling::eOptimal;
+        depth_create_info.initialLayout = vk::ImageLayout::eUndefined;
+        depth_create_info.usage = vk::ImageUsageFlagBits::eDepthStencilAttachment;
+        depth_create_info.sharingMode = vk::SharingMode::eExclusive;
+        depth_create_info.samples = vk::SampleCountFlagBits::e1;
+
+        vk::ImageSubresourceRange subresource_range;
+        subresource_range.aspectMask = vk::ImageAspectFlagBits::eDepth;
+        subresource_range.baseMipLevel = 0;
+        subresource_range.levelCount = 1;
+        subresource_range.baseArrayLayer = 0;
+        subresource_range.layerCount = 1;
+
+        vk::ImageViewCreateInfo depth_view_create_info;
+        depth_view_create_info.viewType = vk::ImageViewType::e2D;
+        depth_view_create_info.format = m_swap_chain_depth_format;
+        depth_view_create_info.subresourceRange = subresource_range;
+
+        // Record a command buffer to copy the staging buffer to the optimized image.
+        vk::CommandBuffer layout_command_buffer = create_one_time_command_buffer();
+
+        m_swap_chain_color_images.reserve(swap_chain_color_images.size());
+        m_swap_chain_depth_images.reserve(swap_chain_color_images.size());
+        for (vk::Image &image : swap_chain_color_images) {
+            device_image color_image;
+
+            color_image.image = color_view_create_info.image = image;
+            color_image.view = m_device.createImageView(color_view_create_info, nullptr, m_dispatch);
+
+            m_swap_chain_color_images.emplace_back(color_image);
+
+            device_image depth_image;
+
+            depth_image.image = m_device.createImage(depth_create_info, nullptr, m_dispatch);
+
+            vk::MemoryRequirements image_mem_reqs = m_device.getImageMemoryRequirements(depth_image.image, m_dispatch);
+
+            vk::MemoryAllocateInfo image_alloc_info;
+            image_alloc_info.allocationSize = image_mem_reqs.size;
+            image_alloc_info.memoryTypeIndex = get_memory_type(image_mem_reqs.memoryTypeBits, optimized_memory_properties);
+            depth_image.device_memory = m_device.allocateMemory(image_alloc_info, nullptr, m_dispatch);
+            m_device.bindImageMemory(depth_image.image, depth_image.device_memory, 0, m_dispatch);
+
+            depth_view_create_info.image = depth_image.image;
+            depth_image.view = m_device.createImageView(depth_view_create_info, nullptr, m_dispatch);
+
+            vk::ImageMemoryBarrier layout_barrier;
+            layout_barrier.srcAccessMask = vk::AccessFlags();
+            layout_barrier.dstAccessMask = vk::AccessFlagBits::eDepthStencilAttachmentRead | vk::AccessFlagBits::eDepthStencilAttachmentWrite;
+            layout_barrier.oldLayout = vk::ImageLayout::eUndefined;
+            layout_barrier.newLayout = vk::ImageLayout::eDepthStencilAttachmentOptimal;
+            layout_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            layout_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            layout_barrier.image = depth_image.image;
+            layout_barrier.subresourceRange = subresource_range;
+            layout_command_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eEarlyFragmentTests, vk::DependencyFlags(), 0, nullptr, 0, nullptr, 1, &layout_barrier, m_dispatch);
+
+            m_swap_chain_depth_images.emplace_back(depth_image);
         }
+
+        // TODO: Rather than finish here, we could wait at the end of the application constructor; will need to
+        // remember staging details to be freed there.
+        finish_one_time_command_buffer(layout_command_buffer);
 
         // Need a fence to use when acquiring a texture from the swap chain.
         vk::FenceCreateInfo fence_create_info;
         fence_create_info.flags = vk::FenceCreateFlagBits::eSignaled;
-        m_image_ready = m_device.createFence(fence_create_info, nullptr, m_dispatch);
+        m_next_image_ready = m_device.createFence(fence_create_info, nullptr, m_dispatch);
     }
 
     void application::shaders_init()
@@ -941,39 +1021,59 @@ namespace gtb {
     void application::render_pass_init()
     {
         // Need a render pass setup for each rendering method.
-        vk::AttachmentDescription color_attachment;
-        color_attachment.format = m_swap_chain_format;
-        color_attachment.samples = vk::SampleCountFlagBits::e1;
-        color_attachment.loadOp = vk::AttachmentLoadOp::eClear;
-        color_attachment.storeOp = vk::AttachmentStoreOp::eStore;
-        color_attachment.stencilLoadOp = vk::AttachmentLoadOp::eDontCare;
-        color_attachment.stencilStoreOp = vk::AttachmentStoreOp::eDontCare;
-        color_attachment.initialLayout = vk::ImageLayout::eUndefined;
-        color_attachment.finalLayout = vk::ImageLayout::ePresentSrcKHR;
+        vk::AttachmentDescription attachments[2];
+        attachments[0].format = m_swap_chain_color_format;
+        attachments[0].samples = vk::SampleCountFlagBits::e1;
+        attachments[0].loadOp = vk::AttachmentLoadOp::eClear;
+        attachments[0].storeOp = vk::AttachmentStoreOp::eStore;
+        attachments[0].stencilLoadOp = vk::AttachmentLoadOp::eDontCare;
+        attachments[0].stencilStoreOp = vk::AttachmentStoreOp::eDontCare;
+        attachments[0].initialLayout = vk::ImageLayout::eUndefined;
+        attachments[0].finalLayout = vk::ImageLayout::ePresentSrcKHR;
+
+        attachments[1].format = m_swap_chain_depth_format;
+        attachments[1].samples = vk::SampleCountFlagBits::e1;
+        attachments[1].loadOp = vk::AttachmentLoadOp::eClear;
+        attachments[1].storeOp = vk::AttachmentStoreOp::eDontCare;
+        attachments[1].stencilLoadOp = vk::AttachmentLoadOp::eDontCare;
+        attachments[1].stencilStoreOp = vk::AttachmentStoreOp::eDontCare;
+        attachments[1].initialLayout = vk::ImageLayout::eUndefined;
+        attachments[1].finalLayout = vk::ImageLayout::eDepthStencilAttachmentOptimal;
 
         vk::AttachmentReference color_reference;
         color_reference.attachment = 0;
         color_reference.layout = vk::ImageLayout::eColorAttachmentOptimal;
 
+        vk::AttachmentReference depth_reference;
+        depth_reference.attachment = 1;
+        depth_reference.layout = vk::ImageLayout::eDepthStencilAttachmentOptimal;
+
         vk::SubpassDescription simple_subpass;
         simple_subpass.pipelineBindPoint = vk::PipelineBindPoint::eGraphics;
         simple_subpass.colorAttachmentCount = 1;
         simple_subpass.pColorAttachments = &color_reference;
+        simple_subpass.pDepthStencilAttachment = &depth_reference;
 
         vk::RenderPassCreateInfo render_pass_create_info;
-        render_pass_create_info.attachmentCount = 1;
-        render_pass_create_info.pAttachments = &color_attachment;
+        render_pass_create_info.attachmentCount = _countof(attachments);
+        render_pass_create_info.pAttachments = attachments;
         render_pass_create_info.subpassCount = 1;
         render_pass_create_info.pSubpasses = &simple_subpass;
         m_simple_render_pass = m_device.createRenderPass(render_pass_create_info, nullptr, m_dispatch);
 
         // Each render pass needs it's own set of frame buffers for the swap chain.
-        m_simple_framebuffers.reserve(m_swap_chain_views.size());
-        for (vk::ImageView& image_view : m_swap_chain_views) {
+        uint32_t frames_in_flight = static_cast<uint32_t>(m_swap_chain_color_images.size());
+        vk::ImageView fb_attachments[2];
+
+        m_simple_framebuffers.reserve(frames_in_flight);
+        for (uint32_t i = 0; i < frames_in_flight; ++i) {
+            fb_attachments[0] = m_swap_chain_color_images[i].view;
+            fb_attachments[1] = m_swap_chain_depth_images[i].view;
+
             vk::FramebufferCreateInfo frame_buffer_create_info;
             frame_buffer_create_info.renderPass = m_simple_render_pass;
-            frame_buffer_create_info.attachmentCount = 1;
-            frame_buffer_create_info.pAttachments = &image_view;
+            frame_buffer_create_info.attachmentCount = _countof(fb_attachments);
+            frame_buffer_create_info.pAttachments = fb_attachments;
             frame_buffer_create_info.width = m_swap_chain_extent.width;
             frame_buffer_create_info.height = m_swap_chain_extent.height;
             frame_buffer_create_info.layers = 1;
@@ -1013,14 +1113,8 @@ namespace gtb {
 
     void application::per_frame_init()
     {
-        // Command pool is the allocator wrapper.
-        vk::CommandPoolCreateInfo command_pool_create_info;
-        command_pool_create_info.flags = vk::CommandPoolCreateFlagBits::eTransient | vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
-        command_pool_create_info.queueFamilyIndex = m_queue_family_index;
-        m_command_pool = m_device.createCommandPool(command_pool_create_info, nullptr, m_dispatch);
-
         // Need a command buffer per frame in flight.
-        uint32_t frames_in_flight = static_cast<uint32_t>(m_swap_chain_images.size());
+        uint32_t frames_in_flight = static_cast<uint32_t>(m_swap_chain_color_images.size());
 
         vk::CommandBufferAllocateInfo command_buffer_allocate_info;
         command_buffer_allocate_info.commandPool = m_command_pool;
@@ -1158,6 +1252,12 @@ namespace gtb {
         rasterization_create_info.depthBiasEnable = VK_FALSE;
         rasterization_create_info.lineWidth = 1.0f;
 
+        // Depth buffer.
+        vk::PipelineDepthStencilStateCreateInfo depth_create_info;
+        depth_create_info.depthTestEnable = VK_TRUE;
+        depth_create_info.depthWriteEnable = VK_TRUE;
+        depth_create_info.depthCompareOp = vk::CompareOp::eLess;
+
         // Multisampling.
         vk::PipelineMultisampleStateCreateInfo multisample_create_info;
         multisample_create_info.rasterizationSamples = vk::SampleCountFlagBits::e1;
@@ -1201,7 +1301,7 @@ namespace gtb {
         layout_create_info.pSetLayouts = &m_simple_descriptor_set_layout;
         m_simple_pipeline_layout = m_device.createPipelineLayout(layout_create_info, nullptr, m_dispatch);
 
-        uint32_t frames_in_flight = static_cast<uint32_t>(m_swap_chain_images.size());
+        uint32_t frames_in_flight = static_cast<uint32_t>(m_swap_chain_color_images.size());
 
         std::vector<vk::DescriptorSetLayout> replicated_set_layouts(frames_in_flight, m_simple_descriptor_set_layout);
         vk::DescriptorSetAllocateInfo set_allocate_info;
@@ -1247,7 +1347,7 @@ namespace gtb {
         pipeline_create_info.pViewportState = &viewport_create_info;
         pipeline_create_info.pRasterizationState = &rasterization_create_info;
         pipeline_create_info.pMultisampleState = &multisample_create_info;
-        //pipeline_create_info.pDepthStencilState = ;
+        pipeline_create_info.pDepthStencilState = &depth_create_info;
         pipeline_create_info.pColorBlendState = &blend_create_info;
         pipeline_create_info.layout = m_simple_pipeline_layout;
         pipeline_create_info.renderPass = m_simple_render_pass;
@@ -1297,12 +1397,15 @@ namespace gtb {
         uint8_t ibo_index = static_cast<uint8_t>(quad_ibo - m_static_geometry_buffers.begin());
 
         // Textures
-        device_texture_vector::iterator quad_tex(create_texture("kueken7_rgba8_srgb.dds"));
+        device_image_vector::iterator quad_tex(create_texture("kueken7_rgba8_srgb.dds"));
         uint8_t tex_index = static_cast<uint8_t>(quad_tex - m_textures.begin());
 
         // Draw list
         // TODO: Temporary until we do model / scene loading.
         m_draws.push_back({ glm::scale(glm::vec3(0.75f, 0.75f, 1.0f)), glm::vec3(1.0f, 0.0f, 0.0f), 6, 0, 0, vbo_index, ibo_index, tex_index });
+
+        glm::mat4 behind_draw = glm::translate(glm::vec3(-0.25f, -0.25f, 0.25f)) * glm::scale(glm::vec3(0.75f, 0.75f, 1.0f));
+        m_draws.push_back({ behind_draw, glm::vec3(0.0f, 1.0f, 0.0f), 6, 0, 0, vbo_index, ibo_index, tex_index });
     }
 
     vk::CommandBuffer application::create_one_time_command_buffer()
@@ -1412,7 +1515,7 @@ namespace gtb {
         m_device.freeMemory(b.device_memory, nullptr, m_dispatch);
     }
 
-    application::device_texture_vector::iterator application::create_texture(const std::string& file_name)
+    application::device_image_vector::iterator application::create_texture(const std::string& file_name)
     {
         gli::texture gli_texture(gli::load(file_name));
         if (gli_texture.empty()) {
@@ -1429,7 +1532,7 @@ namespace gtb {
         m_device.unmapMemory(staging_buffer.device_memory, m_dispatch);
 
         // Create a backing image.
-        device_texture optimized_texture;
+        device_image optimized_texture;
         gli::extent3d gli_texture_extent(gli_texture.extent());
 
         vk::ImageCreateInfo image_create_info;
@@ -1540,11 +1643,16 @@ namespace gtb {
 
     void application::textures_cleanup()
     {
-        for (device_texture& t : m_textures) {
-            m_device.destroyImageView(t.view, nullptr, m_dispatch);
-            m_device.destroyImage(t.image, nullptr, m_dispatch);
-            m_device.freeMemory(t.device_memory, nullptr, m_dispatch);
+        for (device_image& t : m_textures) {
+            cleanup_device_image(t);
         }
+    }
+
+    void application::cleanup_device_image(device_image& t)
+    {
+        m_device.destroyImageView(t.view, nullptr, m_dispatch);
+        m_device.destroyImage(t.image, nullptr, m_dispatch);
+        m_device.freeMemory(t.device_memory, nullptr, m_dispatch);
     }
 
     uint32_t application::get_memory_type(uint32_t allowed_types, vk::MemoryPropertyFlags desired_memory_properties)
@@ -1584,8 +1692,8 @@ namespace gtb {
         constexpr uint64_t infinite_wait = std::numeric_limits<uint64_t>::max();
 
         // Get the next image to render to from the swap chain.
-        m_device.resetFences(m_image_ready, m_dispatch);
-        uint32_t acquired_image = m_device.acquireNextImageKHR(m_swap_chain, infinite_wait, vk::Semaphore(), m_image_ready, m_dispatch).value;
+        m_device.resetFences(m_next_image_ready, m_dispatch);
+        uint32_t acquired_image = m_device.acquireNextImageKHR(m_swap_chain, infinite_wait, vk::Semaphore(), m_next_image_ready, m_dispatch).value;
         // TODO: Deal with suboptimal or out-of-date swapchains
 
         // Get command buffers objects associated with this image.
@@ -1605,22 +1713,42 @@ namespace gtb {
         begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
         command_buffer.begin(begin_info, m_dispatch);
 
-        vk::ClearValue clear_to_black;
-        clear_to_black.color.setFloat32( {{0.0f, 0.0f, 0.0f, 1.0f}} );
+        vk::ClearValue clear_values[2];
+        clear_values[0].color.setFloat32( {{0.0f, 0.0f, 0.0f, 1.0f}} );
+        clear_values[1].depthStencil.setDepth(1.0f);
+        clear_values[1].depthStencil.setStencil(0);
 
         vk::RenderPassBeginInfo pass_begin_info;
         pass_begin_info.renderPass = m_simple_render_pass;
         pass_begin_info.framebuffer = m_simple_framebuffers[acquired_image];
         pass_begin_info.renderArea.offset = vk::Offset2D(0, 0);
         pass_begin_info.renderArea.extent = m_swap_chain_extent;
-        pass_begin_info.clearValueCount = 1;
-        pass_begin_info.pClearValues = &clear_to_black;
+        pass_begin_info.clearValueCount = _countof(clear_values);
+        pass_begin_info.pClearValues = clear_values;
         command_buffer.beginRenderPass(pass_begin_info, vk::SubpassContents::eInline, m_dispatch);
 
         // Generate commands for per-frame but not per-draw work.
         command_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, m_simple_pipeline, m_dispatch);
 
+        // Bind Texture
+        // TODO: Can only do this once per frame!
+        vk::DescriptorImageInfo descriptor_image_info[1];
+        vk::WriteDescriptorSet write_descriptor_set[1];
+
+        descriptor_image_info[0].sampler = m_bilinear_sampler;
+        descriptor_image_info[0].imageView = m_textures[0].view;
+        descriptor_image_info[0].imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+
+        write_descriptor_set[0].dstSet = descriptor_set;
+        write_descriptor_set[0].dstBinding = 2;
+        write_descriptor_set[0].descriptorType = vk::DescriptorType::eCombinedImageSampler;
+        write_descriptor_set[0].descriptorCount = 1;
+        write_descriptor_set[0].pImageInfo = &descriptor_image_info[0];
+
+        m_device.updateDescriptorSets(_countof(write_descriptor_set), write_descriptor_set, 0, nullptr, m_dispatch);
+
         // Setup to write the uniform buffer.
+        // TODO: Keep the memory mapped all of the time.
         uint8_t* ubo_data = reinterpret_cast<uint8_t*>(m_device.mapMemory(uniform_buffer.device_memory, 0, per_frame_ubo_size, vk::MemoryMapFlags(), m_dispatch));
         uint32_t ubo_offset = 0;
 
@@ -1630,22 +1758,6 @@ namespace gtb {
             vk::DeviceSize zero_offset = 0;
             command_buffer.bindVertexBuffers(0, m_static_geometry_buffers[d.vbo].buffer, zero_offset, m_dispatch);
             command_buffer.bindIndexBuffer(m_static_geometry_buffers[d.ibo].buffer, zero_offset, vk::IndexType::eUint16, m_dispatch);
-
-            // Bind Texture
-            vk::DescriptorImageInfo descriptor_image_info[1];
-            vk::WriteDescriptorSet write_descriptor_set[1];
-
-            descriptor_image_info[0].sampler = m_bilinear_sampler;
-            descriptor_image_info[0].imageView = m_textures[d.texture].view;
-            descriptor_image_info[0].imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
-
-            write_descriptor_set[0].dstSet = descriptor_set;
-            write_descriptor_set[0].dstBinding = 2;
-            write_descriptor_set[0].descriptorType = vk::DescriptorType::eCombinedImageSampler;
-            write_descriptor_set[0].descriptorCount = 1;
-            write_descriptor_set[0].pImageInfo = &descriptor_image_info[0];
-
-            m_device.updateDescriptorSets(_countof(write_descriptor_set), write_descriptor_set, 0, nullptr, m_dispatch);
 
             // Fill out and bind uniform buffer.
             uint32_t dynamic_ubo_offsets[2];
@@ -1673,7 +1785,7 @@ namespace gtb {
         command_buffer.end(m_dispatch);
 
         // Now we need our aquired image to actually be ready.
-        m_device.waitForFences(m_image_ready, VK_FALSE, infinite_wait, m_dispatch);
+        m_device.waitForFences(m_next_image_ready, VK_FALSE, infinite_wait, m_dispatch);
 
         // Submit work.
         vk::SubmitInfo submit_info;
