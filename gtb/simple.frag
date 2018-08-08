@@ -5,11 +5,11 @@ layout(location = 0) in vec2 tex_coord;
 
 layout(location = 0) out vec4 frag_color;
 
-layout(binding = 1) uniform frag_shader_block {
+layout(set = 0, binding = 1) uniform frag_shader_block {
     vec3 color;
 };
 
-layout(binding = 2) uniform sampler2D tex_sampler;
+layout(set = 1, binding = 2) uniform sampler2D tex_sampler;
 
 void main()
 {

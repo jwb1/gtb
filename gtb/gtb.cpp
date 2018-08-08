@@ -332,24 +332,30 @@ namespace gtb {
         vk::RenderPass m_simple_render_pass;
         std::vector<vk::Framebuffer> m_simple_framebuffers;
 
-        // Sampler objects
-        vk::Sampler m_bilinear_sampler;
-
-        // Pipelines
-        vk::DescriptorSetLayout m_simple_descriptor_set_layout;
-        vk::PipelineLayout m_simple_pipeline_layout;
-        std::vector<vk::DescriptorSet> m_simple_descriptor_sets;
-        vk::Pipeline m_simple_pipeline;
-
         // Command buffers (normally per-rendering thread)
         vk::CommandPool m_command_pool;
         std::vector<vk::CommandBuffer> m_command_buffers;
         std::vector<vk::Fence> m_command_fences;
 
+        // Sampler objects
+        vk::Sampler m_bilinear_sampler;
+
+        // Pipelines
+        vk::PipelineLayout m_simple_pipeline_layout;
+        vk::Pipeline m_simple_pipeline;
+
         // Uniform buffers
         uint32_t m_ubo_min_field_align;
         device_buffer_vector m_uniform_buffers;
-        vk::DescriptorPool m_descriptor_pool;
+
+        // Mutable bound state = One set per frame pointing at each per-frame uniform buffer.
+        vk::DescriptorPool m_mutable_descriptor_pool;
+        vk::DescriptorSetLayout m_simple_mutable_set_layout;
+        std::vector<vk::DescriptorSet> m_simple_mutable_sets;
+
+        // Immutable bound state = One set per draw.
+        vk::DescriptorPool m_immutable_descriptor_pool;
+        vk::DescriptorSetLayout m_simple_immutable_set_layout;
 
         // Geometry objects
         device_buffer_vector m_static_geometry_buffers;
@@ -365,9 +371,11 @@ namespace gtb {
             uint32_t index_count;
             uint32_t first_index;
             int32_t vertex_offset;
+
+            vk::DescriptorSet immutable_state;
+
             uint8_t vbo;
             uint8_t ibo;
-            uint8_t texture;
         };
         typedef std::vector<draw_record> draw_vector;
         draw_vector m_draws;
@@ -832,6 +840,9 @@ namespace gtb {
         queue_create_info.queueCount = 1;
         queue_create_info.pQueuePriorities = &queue_priority;
 
+        vk::PhysicalDeviceFeatures device_features;
+        device_features.textureCompressionBC = VK_TRUE;
+
         vk::DeviceCreateInfo device_create_info;
         device_create_info.queueCreateInfoCount = 1;
         device_create_info.pQueueCreateInfos = &queue_create_info;
@@ -839,6 +850,7 @@ namespace gtb {
         device_create_info.ppEnabledLayerNames = required_layers.data();
         device_create_info.enabledExtensionCount = static_cast<uint32_t>(required_extensions.size());
         device_create_info.ppEnabledExtensionNames = required_extensions.data();
+        device_create_info.pEnabledFeatures = &device_features;
         m_device = m_physical_device.createDevice(device_create_info, nullptr, d);
 
         // Init the dynamic dispatch. All future Vulkan functions will be called through this.
@@ -1129,19 +1141,16 @@ namespace gtb {
         }
 
         // Descriptors help us bind uniform buffer memory. Need a pool object to allocate them.
-        vk::DescriptorPoolSize descriptor_pool_sizes[2];
-        descriptor_pool_sizes[0].type = vk::DescriptorType::eUniformBufferDynamic;
-        descriptor_pool_sizes[0].descriptorCount = frames_in_flight * 2;
-
-        descriptor_pool_sizes[1].type = vk::DescriptorType::eCombinedImageSampler;
-        descriptor_pool_sizes[1].descriptorCount = frames_in_flight * 1;
+        vk::DescriptorPoolSize descriptor_pool_size;
+        descriptor_pool_size.type = vk::DescriptorType::eUniformBufferDynamic;
+        descriptor_pool_size.descriptorCount = frames_in_flight * 2; // 2 == number of uniform buffers
 
         vk::DescriptorPoolCreateInfo descriptor_pool_create_info;
         descriptor_pool_create_info.maxSets = frames_in_flight;
-        descriptor_pool_create_info.poolSizeCount = _countof(descriptor_pool_sizes);
-        descriptor_pool_create_info.pPoolSizes = descriptor_pool_sizes;
+        descriptor_pool_create_info.poolSizeCount = 1;
+        descriptor_pool_create_info.pPoolSizes = &descriptor_pool_size;
 
-        m_descriptor_pool = m_device.createDescriptorPool(descriptor_pool_create_info, nullptr, m_dispatch);
+        m_mutable_descriptor_pool = m_device.createDescriptorPool(descriptor_pool_create_info, nullptr, m_dispatch);
 
         // Need a fence per command buffer / uniform buffer.
         vk::FenceCreateInfo fence_create_info;
@@ -1159,8 +1168,8 @@ namespace gtb {
             m_device.destroyFence(fence, nullptr, m_dispatch);
         }
 
-        if (m_descriptor_pool) {
-            m_device.destroyDescriptorPool(m_descriptor_pool, nullptr, m_dispatch);
+        if (m_mutable_descriptor_pool) {
+            m_device.destroyDescriptorPool(m_mutable_descriptor_pool, nullptr, m_dispatch);
         }
 
         for (device_buffer& b : m_uniform_buffers) {
@@ -1274,42 +1283,53 @@ namespace gtb {
         blend_create_info.attachmentCount = 1;
         blend_create_info.pAttachments = &color_blend_attachment;
 
-        // UBO layout.
-        vk::DescriptorSetLayoutBinding set_layout_bindings[3];
-        set_layout_bindings[0].binding = 0;
-        set_layout_bindings[0].descriptorType = vk::DescriptorType::eUniformBufferDynamic;
-        set_layout_bindings[0].descriptorCount = 1;
-        set_layout_bindings[0].stageFlags = vk::ShaderStageFlagBits::eVertex;
+        // Binding layout.
+        vk::DescriptorSetLayoutBinding mutable_set_layout_bindings[2];
+        mutable_set_layout_bindings[0].binding = 0;
+        mutable_set_layout_bindings[0].descriptorType = vk::DescriptorType::eUniformBufferDynamic;
+        mutable_set_layout_bindings[0].descriptorCount = 1;
+        mutable_set_layout_bindings[0].stageFlags = vk::ShaderStageFlagBits::eVertex;
 
-        set_layout_bindings[1].binding = 1;
-        set_layout_bindings[1].descriptorType = vk::DescriptorType::eUniformBufferDynamic;
-        set_layout_bindings[1].descriptorCount = 1;
-        set_layout_bindings[1].stageFlags = vk::ShaderStageFlagBits::eFragment;
+        mutable_set_layout_bindings[1].binding = 1;
+        mutable_set_layout_bindings[1].descriptorType = vk::DescriptorType::eUniformBufferDynamic;
+        mutable_set_layout_bindings[1].descriptorCount = 1;
+        mutable_set_layout_bindings[1].stageFlags = vk::ShaderStageFlagBits::eFragment;
 
-        set_layout_bindings[2].binding = 2;
-        set_layout_bindings[2].descriptorType = vk::DescriptorType::eCombinedImageSampler;
-        set_layout_bindings[2].descriptorCount = 1;
-        set_layout_bindings[2].stageFlags = vk::ShaderStageFlagBits::eFragment;
+        vk::DescriptorSetLayoutCreateInfo mutable_set_layout_create_info;
+        mutable_set_layout_create_info.bindingCount = _countof(mutable_set_layout_bindings);
+        mutable_set_layout_create_info.pBindings = mutable_set_layout_bindings;
+        m_simple_mutable_set_layout = m_device.createDescriptorSetLayout(mutable_set_layout_create_info, nullptr, m_dispatch);
 
-        vk::DescriptorSetLayoutCreateInfo set_layout_create_info;
-        set_layout_create_info.bindingCount = _countof(set_layout_bindings);
-        set_layout_create_info.pBindings = set_layout_bindings;
-        m_simple_descriptor_set_layout = m_device.createDescriptorSetLayout(set_layout_create_info, nullptr, m_dispatch);
+        vk::DescriptorSetLayoutBinding immutable_set_layout_bindings[1];
+        immutable_set_layout_bindings[0].binding = 2;
+        immutable_set_layout_bindings[0].descriptorType = vk::DescriptorType::eCombinedImageSampler;
+        immutable_set_layout_bindings[0].descriptorCount = 1;
+        immutable_set_layout_bindings[0].stageFlags = vk::ShaderStageFlagBits::eFragment;
+
+        vk::DescriptorSetLayoutCreateInfo immutable_set_layout_create_info;
+        immutable_set_layout_create_info.bindingCount = _countof(immutable_set_layout_bindings);
+        immutable_set_layout_create_info.pBindings = immutable_set_layout_bindings;
+        m_simple_immutable_set_layout = m_device.createDescriptorSetLayout(immutable_set_layout_create_info, nullptr, m_dispatch);
+
+        vk::DescriptorSetLayout set_layouts[] = {
+            m_simple_mutable_set_layout, m_simple_immutable_set_layout
+        };
 
         vk::PipelineLayoutCreateInfo layout_create_info;
-        layout_create_info.setLayoutCount = 1;
-        layout_create_info.pSetLayouts = &m_simple_descriptor_set_layout;
+        layout_create_info.setLayoutCount = _countof(set_layouts);
+        layout_create_info.pSetLayouts = set_layouts;
         m_simple_pipeline_layout = m_device.createPipelineLayout(layout_create_info, nullptr, m_dispatch);
 
+        // UBO descriptor setup.
         uint32_t frames_in_flight = static_cast<uint32_t>(m_swap_chain_color_images.size());
 
-        std::vector<vk::DescriptorSetLayout> replicated_set_layouts(frames_in_flight, m_simple_descriptor_set_layout);
+        std::vector<vk::DescriptorSetLayout> replicated_set_layouts(frames_in_flight, m_simple_mutable_set_layout);
         vk::DescriptorSetAllocateInfo set_allocate_info;
-        set_allocate_info.descriptorPool = m_descriptor_pool;
+        set_allocate_info.descriptorPool = m_mutable_descriptor_pool;
         set_allocate_info.descriptorSetCount = frames_in_flight;
         set_allocate_info.pSetLayouts = replicated_set_layouts.data();
 
-        m_simple_descriptor_sets = m_device.allocateDescriptorSets(set_allocate_info, m_dispatch);
+        m_simple_mutable_sets = m_device.allocateDescriptorSets(set_allocate_info, m_dispatch);
 
         for (uint32_t i = 0; i < frames_in_flight; ++i) {
             vk::DescriptorBufferInfo descriptor_buffer_info[2];
@@ -1319,7 +1339,7 @@ namespace gtb {
             descriptor_buffer_info[0].offset = 0; // Offsets will be set dynamically at bind time.
             descriptor_buffer_info[0].range = sizeof(glm::mat4);
 
-            write_descriptor_set[0].dstSet = m_simple_descriptor_sets[i];
+            write_descriptor_set[0].dstSet = m_simple_mutable_sets[i];
             write_descriptor_set[0].dstBinding = 0;
             write_descriptor_set[0].descriptorType = vk::DescriptorType::eUniformBufferDynamic;
             write_descriptor_set[0].descriptorCount = 1;
@@ -1329,7 +1349,7 @@ namespace gtb {
             descriptor_buffer_info[1].offset = 0; // Offsets will be set dynamically at bind time.
             descriptor_buffer_info[1].range = sizeof(glm::vec3);
 
-            write_descriptor_set[1].dstSet = m_simple_descriptor_sets[i];
+            write_descriptor_set[1].dstSet = m_simple_mutable_sets[i];
             write_descriptor_set[1].dstBinding = 1;
             write_descriptor_set[1].descriptorType = vk::DescriptorType::eUniformBufferDynamic;
             write_descriptor_set[1].descriptorCount = 1;
@@ -1366,8 +1386,12 @@ namespace gtb {
             m_device.destroyPipelineLayout(m_simple_pipeline_layout, nullptr, m_dispatch);
         }
 
-        if (m_simple_descriptor_set_layout) {
-            m_device.destroyDescriptorSetLayout(m_simple_descriptor_set_layout, nullptr, m_dispatch);
+        if (m_simple_mutable_set_layout) {
+            m_device.destroyDescriptorSetLayout(m_simple_mutable_set_layout, nullptr, m_dispatch);
+        }
+
+        if (m_simple_immutable_set_layout) {
+            m_device.destroyDescriptorSetLayout(m_simple_immutable_set_layout, nullptr, m_dispatch);
         }
     }
 
@@ -1397,15 +1421,68 @@ namespace gtb {
         uint8_t ibo_index = static_cast<uint8_t>(quad_ibo - m_static_geometry_buffers.begin());
 
         // Textures
-        device_image_vector::iterator quad_tex(create_texture("kueken7_rgba8_srgb.dds"));
-        uint8_t tex_index = static_cast<uint8_t>(quad_tex - m_textures.begin());
+        create_texture("flowers1.dds");
+        create_texture("flowers2.dds");
+
+        // Now do per-draw setup
+        uint32_t draws = 2;
+        m_draws.reserve(draws);
+
+        // Immutable state needs a pool and one set per draw.
+        vk::DescriptorPoolSize descriptor_pool_sizes[1];
+
+        descriptor_pool_sizes[0].type = vk::DescriptorType::eCombinedImageSampler;
+        descriptor_pool_sizes[0].descriptorCount = 2 * 1;
+
+        vk::DescriptorPoolCreateInfo descriptor_pool_create_info;
+        descriptor_pool_create_info.maxSets = 2;
+        descriptor_pool_create_info.poolSizeCount = _countof(descriptor_pool_sizes);
+        descriptor_pool_create_info.pPoolSizes = descriptor_pool_sizes;
+
+        m_immutable_descriptor_pool = m_device.createDescriptorPool(descriptor_pool_create_info, nullptr, m_dispatch);
+
+        std::vector<vk::DescriptorSetLayout> replicated_set_layouts(draws, m_simple_immutable_set_layout);
+        vk::DescriptorSetAllocateInfo set_allocate_info;
+        set_allocate_info.descriptorPool = m_immutable_descriptor_pool;
+        set_allocate_info.descriptorSetCount = draws;
+        set_allocate_info.pSetLayouts = replicated_set_layouts.data();
+
+        std::vector<vk::DescriptorSet> simple_immutable_sets = m_device.allocateDescriptorSets(set_allocate_info, m_dispatch);
+
+        // Write all of the immutable state binding information into the sets.
+        vk::DescriptorImageInfo descriptor_image_info[2];
+        vk::WriteDescriptorSet write_descriptor_set[2];
+
+        descriptor_image_info[0].sampler = m_bilinear_sampler;
+        descriptor_image_info[0].imageView = m_textures[0].view;
+        descriptor_image_info[0].imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+
+        write_descriptor_set[0].dstSet = simple_immutable_sets[0];
+        write_descriptor_set[0].dstBinding = 2;
+        write_descriptor_set[0].descriptorType = vk::DescriptorType::eCombinedImageSampler;
+        write_descriptor_set[0].descriptorCount = 1;
+        write_descriptor_set[0].pImageInfo = &descriptor_image_info[0];
+
+        descriptor_image_info[1].sampler = m_bilinear_sampler;
+        descriptor_image_info[1].imageView = m_textures[1].view;
+        descriptor_image_info[1].imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+
+        write_descriptor_set[1].dstSet = simple_immutable_sets[1];
+        write_descriptor_set[1].dstBinding = 2;
+        write_descriptor_set[1].descriptorType = vk::DescriptorType::eCombinedImageSampler;
+        write_descriptor_set[1].descriptorCount = 1;
+        write_descriptor_set[1].pImageInfo = &descriptor_image_info[1];
+
+        m_device.updateDescriptorSets(_countof(write_descriptor_set), write_descriptor_set, 0, nullptr, m_dispatch);
 
         // Draw list
         // TODO: Temporary until we do model / scene loading.
-        m_draws.push_back({ glm::scale(glm::vec3(0.75f, 0.75f, 1.0f)), glm::vec3(1.0f, 0.0f, 0.0f), 6, 0, 0, vbo_index, ibo_index, tex_index });
+
+        glm::mat4 in_front_draw = glm::scale(glm::vec3(0.75f, 0.75f, 1.0f));
+        m_draws.push_back({ in_front_draw, glm::vec3(1.0f, 0.0f, 0.0f), 6, 0, 0, simple_immutable_sets[0], vbo_index, ibo_index });
 
         glm::mat4 behind_draw = glm::translate(glm::vec3(-0.25f, -0.25f, 0.25f)) * glm::scale(glm::vec3(0.75f, 0.75f, 1.0f));
-        m_draws.push_back({ behind_draw, glm::vec3(0.0f, 1.0f, 0.0f), 6, 0, 0, vbo_index, ibo_index, tex_index });
+        m_draws.push_back({ behind_draw, glm::vec3(0.0f, 1.0f, 0.0f), 6, 0, 0, simple_immutable_sets[1], vbo_index, ibo_index });
     }
 
     vk::CommandBuffer application::create_one_time_command_buffer()
@@ -1643,6 +1720,11 @@ namespace gtb {
 
     void application::textures_cleanup()
     {
+        // TODO: Immutable state is currently textures, cleanup should probably be elsewhere.
+        if (m_immutable_descriptor_pool) {
+            m_device.destroyDescriptorPool(m_immutable_descriptor_pool, nullptr, m_dispatch);
+        }
+
         for (device_image& t : m_textures) {
             cleanup_device_image(t);
         }
@@ -1700,7 +1782,7 @@ namespace gtb {
         vk::CommandBuffer& command_buffer(m_command_buffers[acquired_image]);
         vk::Fence& command_fence(m_command_fences[acquired_image]);
         device_buffer& uniform_buffer(m_uniform_buffers[acquired_image]);
-        vk::DescriptorSet& descriptor_set(m_simple_descriptor_sets[acquired_image]);
+        vk::DescriptorSet& descriptor_set(m_simple_mutable_sets[acquired_image]);
 
         // Wait for the commands complete fence in order to record.
         m_device.waitForFences(command_fence, VK_FALSE, infinite_wait, m_dispatch);
@@ -1730,23 +1812,6 @@ namespace gtb {
         // Generate commands for per-frame but not per-draw work.
         command_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, m_simple_pipeline, m_dispatch);
 
-        // Bind Texture
-        // TODO: Can only do this once per frame!
-        vk::DescriptorImageInfo descriptor_image_info[1];
-        vk::WriteDescriptorSet write_descriptor_set[1];
-
-        descriptor_image_info[0].sampler = m_bilinear_sampler;
-        descriptor_image_info[0].imageView = m_textures[0].view;
-        descriptor_image_info[0].imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
-
-        write_descriptor_set[0].dstSet = descriptor_set;
-        write_descriptor_set[0].dstBinding = 2;
-        write_descriptor_set[0].descriptorType = vk::DescriptorType::eCombinedImageSampler;
-        write_descriptor_set[0].descriptorCount = 1;
-        write_descriptor_set[0].pImageInfo = &descriptor_image_info[0];
-
-        m_device.updateDescriptorSets(_countof(write_descriptor_set), write_descriptor_set, 0, nullptr, m_dispatch);
-
         // Setup to write the uniform buffer.
         // TODO: Keep the memory mapped all of the time.
         uint8_t* ubo_data = reinterpret_cast<uint8_t*>(m_device.mapMemory(uniform_buffer.device_memory, 0, per_frame_ubo_size, vk::MemoryMapFlags(), m_dispatch));
@@ -1759,7 +1824,7 @@ namespace gtb {
             command_buffer.bindVertexBuffers(0, m_static_geometry_buffers[d.vbo].buffer, zero_offset, m_dispatch);
             command_buffer.bindIndexBuffer(m_static_geometry_buffers[d.ibo].buffer, zero_offset, vk::IndexType::eUint16, m_dispatch);
 
-            // Fill out and bind uniform buffer.
+            // Fill out and bind dynamic state uniform buffer.
             uint32_t dynamic_ubo_offsets[2];
 
             // Update transform UBO field.
@@ -1773,6 +1838,9 @@ namespace gtb {
             ubo_offset = align_up(ubo_offset + sizeof(glm::vec3), m_ubo_min_field_align);
 
             command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, m_simple_pipeline_layout, 0, 1, &descriptor_set, _countof(dynamic_ubo_offsets), dynamic_ubo_offsets, m_dispatch);
+
+            // Bind the immutable state.
+            command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, m_simple_pipeline_layout, 1, 1, &d.immutable_state, 0, nullptr, m_dispatch);
 
             // Draw
             command_buffer.drawIndexed(d.index_count, 1, d.first_index, d.vertex_offset, 0, m_dispatch);

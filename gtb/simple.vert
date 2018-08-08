@@ -7,7 +7,7 @@ layout(location = 2) in vec2 vertex_tex_coord;
 
 layout(location = 0) out vec2 out_tex_coord;
 
-layout(binding = 0) uniform vert_shader_block {
+layout(set = 0, binding = 0) uniform vert_shader_block {
     mat4 model_to_clip_transform; // projection transform * view transform * model transform
 };
 
