@@ -10,3 +10,6 @@
 [submodule "modules/gli"]
 	path = modules/gli
 	url = https://github.com/jwb1/gli.git
+[submodule "modules/tinygltf"]
+	path = modules/tinygltf
+	url = https://github.com/jwb1/tinygltf.git
