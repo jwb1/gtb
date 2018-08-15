@@ -57,7 +57,7 @@
       <SDLCheck>true</SDLCheck>
       <ConformanceMode>true</ConformanceMode>
       <TreatWarningAsError>true</TreatWarningAsError>
-      <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)modules/glfw/include;$(SolutionDir)modules/glm;$(SolutionDir)modules/gli;$(SolutionDir)modules/boost;$(VULKAN_SDK)\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)modules/glfw/include;$(SolutionDir)modules/glm;$(SolutionDir)modules/gli;$(SolutionDir)modules/boost;$(SolutionDir)modules/tinygltf;$(VULKAN_SDK)/Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>GTB_BUILD_TYPE=1</PreprocessorDefinitions>
     </ClCompile>
     <Link>
@@ -66,6 +66,12 @@
       <AdditionalDependencies>$(SolutionDir)modules/glfw/src/$(Configuration)/glfw3.lib;$(VULKAN_SDK)/Lib/vulkan-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(SolutionDir)modules/boost/stage/lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
+    <PostBuildEvent>
+      <Command>xcopy "$(SolutionDir)content\*" "$(TargetDir)" /D /I /Q /Y</Command>
+    </PostBuildEvent>
+    <PostBuildEvent>
+      <Message>Copying test content to output directory</Message>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -76,7 +82,7 @@
       <SDLCheck>true</SDLCheck>
       <ConformanceMode>true</ConformanceMode>
       <TreatWarningAsError>true</TreatWarningAsError>
-      <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)modules/glfw/include;$(SolutionDir)modules/glm;$(SolutionDir)modules/gli;$(SolutionDir)modules/boost;$(VULKAN_SDK)\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)modules/glfw/include;$(SolutionDir)modules/glm;$(SolutionDir)modules/gli;$(SolutionDir)modules/boost;$(SolutionDir)modules/tinygltf;$(VULKAN_SDK)/Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>GTB_BUILD_TYPE=2</PreprocessorDefinitions>
     </ClCompile>
     <Link>
@@ -87,6 +93,12 @@
       <AdditionalDependencies>$(SolutionDir)modules/glfw/src/$(Configuration)/glfw3.lib;$(VULKAN_SDK)/Lib/vulkan-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(SolutionDir)modules/boost/stage/lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
+    <PostBuildEvent>
+      <Command>xcopy "$(SolutionDir)content\*" "$(TargetDir)" /D /I /Q /Y</Command>
+    </PostBuildEvent>
+    <PostBuildEvent>
+      <Message>Copying test content to output directory</Message>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="gtb\dbg_out.hpp" />

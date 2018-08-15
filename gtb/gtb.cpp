@@ -76,6 +76,12 @@
 #pragma warning (pop)
 #endif
 
+// TinyGLTF
+#define TINYGLTF_IMPLEMENTATION
+#define TINYGLTF_NO_STB_IMAGE
+#define TINYGLTF_NO_STB_IMAGE_WRITE
+#include <tiny_gltf.h>
+
 // Local helper classes
 #include "gtb/glfw_dispatch_loader.hpp"
 #include "gtb/dbg_out.hpp"
@@ -155,6 +161,7 @@ namespace gtb {
         class file_exception : public exception {};
 
         typedef boost::error_info<struct errinfo_file_exception_file_, const char*> errinfo_file_exception_file;
+        typedef boost::error_info<struct errinfo_file_exception_file_, const char*> errinfo_file_exception_message;
 
         // Exception handlers; only intended to be called in catch blocks!
         int handle_exception(const gtb::error::exception& e)
@@ -366,7 +373,6 @@ namespace gtb {
         // Draw list
         struct draw_record {
             glm::mat4 transform;
-            glm::vec3 color;
 
             uint32_t index_count;
             uint32_t first_index;
@@ -388,6 +394,9 @@ namespace gtb {
     private:
         application();
         ~application();
+
+        void init(int argc, char* argv[]);
+        void cleanup();
 
         void tick();
         void draw();
@@ -449,7 +458,20 @@ namespace gtb {
         void per_frame_cleanup();
 
         // Built-in objects
-        void builtin_init();
+        void builtin_object_init();
+
+        // Loaded objects
+        void load_objects_init(const std::string& file_name);
+        void load_gltf_node(const tinygltf::Model& model, const tinygltf::Node& node, const glm::mat4& parent_transform); // Recursive!
+
+        static bool gltf_load_image_data(
+            tinygltf::Image* image,
+            std::string* load_error,
+            int required_width,
+            int required_height,
+            const unsigned char* bytes,
+            int size,
+            void* user_data);
 
         // Command buffers
         vk::CommandBuffer create_one_time_command_buffer();
@@ -503,10 +525,35 @@ namespace gtb {
         , m_queue_family_index(std::numeric_limits<uint32_t>::max())
         , m_ubo_min_field_align(0)
     {
-        open_log_stream(m_log_stream, "runtime.log");
-
         std::fexcept_t fe;
         std::fesetexceptflag(&fe, 0);
+    }
+
+    application::~application()
+    {}
+
+    int application::run(int argc, char* argv[])
+    {
+        init(argc, argv);
+
+        while (!glfwWindowShouldClose(m_window)) {
+            glfwPollEvents();
+            tick();
+            draw();
+        }
+
+        cleanup();
+        return (EXIT_SUCCESS);
+    }
+
+    void application::init(int argc, char* argv[])
+    {
+        std::string object_file("gtb.gltf");
+        if (argc >= 2) {
+            object_file = argv[1];
+        }
+
+        open_log_stream(m_log_stream, "runtime.log");
 
         glfw_init();
         vk_init();
@@ -517,10 +564,11 @@ namespace gtb {
         pipeline_init();
 
         // geometry buffers and textures are either built-in or loaded.
-        builtin_init();
+        builtin_object_init();
+        load_objects_init(object_file);
     }
 
-    application::~application()
+    void application::cleanup()
     {
         if (m_device) {
             m_device.waitIdle(m_dispatch);
@@ -1143,7 +1191,7 @@ namespace gtb {
         // Descriptors help us bind uniform buffer memory. Need a pool object to allocate them.
         vk::DescriptorPoolSize descriptor_pool_size;
         descriptor_pool_size.type = vk::DescriptorType::eUniformBufferDynamic;
-        descriptor_pool_size.descriptorCount = frames_in_flight * 2; // 2 == number of uniform buffers
+        descriptor_pool_size.descriptorCount = frames_in_flight * 1; // 1 == number of uniform buffers
 
         vk::DescriptorPoolCreateInfo descriptor_pool_create_info;
         descriptor_pool_create_info.maxSets = frames_in_flight;
@@ -1284,16 +1332,11 @@ namespace gtb {
         blend_create_info.pAttachments = &color_blend_attachment;
 
         // Binding layout.
-        vk::DescriptorSetLayoutBinding mutable_set_layout_bindings[2];
+        vk::DescriptorSetLayoutBinding mutable_set_layout_bindings[1];
         mutable_set_layout_bindings[0].binding = 0;
         mutable_set_layout_bindings[0].descriptorType = vk::DescriptorType::eUniformBufferDynamic;
         mutable_set_layout_bindings[0].descriptorCount = 1;
         mutable_set_layout_bindings[0].stageFlags = vk::ShaderStageFlagBits::eVertex;
-
-        mutable_set_layout_bindings[1].binding = 1;
-        mutable_set_layout_bindings[1].descriptorType = vk::DescriptorType::eUniformBufferDynamic;
-        mutable_set_layout_bindings[1].descriptorCount = 1;
-        mutable_set_layout_bindings[1].stageFlags = vk::ShaderStageFlagBits::eFragment;
 
         vk::DescriptorSetLayoutCreateInfo mutable_set_layout_create_info;
         mutable_set_layout_create_info.bindingCount = _countof(mutable_set_layout_bindings);
@@ -1301,7 +1344,7 @@ namespace gtb {
         m_simple_mutable_set_layout = m_device.createDescriptorSetLayout(mutable_set_layout_create_info, nullptr, m_dispatch);
 
         vk::DescriptorSetLayoutBinding immutable_set_layout_bindings[1];
-        immutable_set_layout_bindings[0].binding = 2;
+        immutable_set_layout_bindings[0].binding = 1;
         immutable_set_layout_bindings[0].descriptorType = vk::DescriptorType::eCombinedImageSampler;
         immutable_set_layout_bindings[0].descriptorCount = 1;
         immutable_set_layout_bindings[0].stageFlags = vk::ShaderStageFlagBits::eFragment;
@@ -1332,8 +1375,8 @@ namespace gtb {
         m_simple_mutable_sets = m_device.allocateDescriptorSets(set_allocate_info, m_dispatch);
 
         for (uint32_t i = 0; i < frames_in_flight; ++i) {
-            vk::DescriptorBufferInfo descriptor_buffer_info[2];
-            vk::WriteDescriptorSet write_descriptor_set[2];
+            vk::DescriptorBufferInfo descriptor_buffer_info[1];
+            vk::WriteDescriptorSet write_descriptor_set[1];
 
             descriptor_buffer_info[0].buffer = m_uniform_buffers[i].buffer;
             descriptor_buffer_info[0].offset = 0; // Offsets will be set dynamically at bind time.
@@ -1344,16 +1387,6 @@ namespace gtb {
             write_descriptor_set[0].descriptorType = vk::DescriptorType::eUniformBufferDynamic;
             write_descriptor_set[0].descriptorCount = 1;
             write_descriptor_set[0].pBufferInfo = &descriptor_buffer_info[0];
-
-            descriptor_buffer_info[1].buffer = m_uniform_buffers[i].buffer;
-            descriptor_buffer_info[1].offset = 0; // Offsets will be set dynamically at bind time.
-            descriptor_buffer_info[1].range = sizeof(glm::vec3);
-
-            write_descriptor_set[1].dstSet = m_simple_mutable_sets[i];
-            write_descriptor_set[1].dstBinding = 1;
-            write_descriptor_set[1].descriptorType = vk::DescriptorType::eUniformBufferDynamic;
-            write_descriptor_set[1].descriptorCount = 1;
-            write_descriptor_set[1].pBufferInfo = &descriptor_buffer_info[1];
 
             m_device.updateDescriptorSets(_countof(write_descriptor_set), write_descriptor_set, 0, nullptr, m_dispatch);
         }
@@ -1395,7 +1428,7 @@ namespace gtb {
         }
     }
 
-    void application::builtin_init()
+    void application::builtin_object_init()
     {
         // A Textured Quad (No quad primitive in Vulkan, so two tris and eat the helpers.)
         static const gtb::vertex quad_verts[] = {
@@ -1458,7 +1491,7 @@ namespace gtb {
         descriptor_image_info[0].imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
 
         write_descriptor_set[0].dstSet = simple_immutable_sets[0];
-        write_descriptor_set[0].dstBinding = 2;
+        write_descriptor_set[0].dstBinding = 1;
         write_descriptor_set[0].descriptorType = vk::DescriptorType::eCombinedImageSampler;
         write_descriptor_set[0].descriptorCount = 1;
         write_descriptor_set[0].pImageInfo = &descriptor_image_info[0];
@@ -1468,7 +1501,7 @@ namespace gtb {
         descriptor_image_info[1].imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
 
         write_descriptor_set[1].dstSet = simple_immutable_sets[1];
-        write_descriptor_set[1].dstBinding = 2;
+        write_descriptor_set[1].dstBinding = 1;
         write_descriptor_set[1].descriptorType = vk::DescriptorType::eCombinedImageSampler;
         write_descriptor_set[1].descriptorCount = 1;
         write_descriptor_set[1].pImageInfo = &descriptor_image_info[1];
@@ -1479,10 +1512,108 @@ namespace gtb {
         // TODO: Temporary until we do model / scene loading.
 
         glm::mat4 in_front_draw = glm::scale(glm::vec3(0.75f, 0.75f, 1.0f));
-        m_draws.push_back({ in_front_draw, glm::vec3(1.0f, 0.0f, 0.0f), 6, 0, 0, simple_immutable_sets[0], vbo_index, ibo_index });
+        m_draws.push_back({ in_front_draw, 6, 0, 0, simple_immutable_sets[0], vbo_index, ibo_index });
 
         glm::mat4 behind_draw = glm::translate(glm::vec3(-0.25f, -0.25f, 0.25f)) * glm::scale(glm::vec3(0.75f, 0.75f, 1.0f));
-        m_draws.push_back({ behind_draw, glm::vec3(0.0f, 1.0f, 0.0f), 6, 0, 0, simple_immutable_sets[1], vbo_index, ibo_index });
+        m_draws.push_back({ behind_draw, 6, 0, 0, simple_immutable_sets[1], vbo_index, ibo_index });
+    }
+
+    void application::load_objects_init(const std::string& file_name)
+    {
+        tinygltf::TinyGLTF loader;
+        loader.SetImageLoader(gltf_load_image_data, this);
+
+        tinygltf::Model model;
+        std::string loader_error;
+
+        if (!loader.LoadASCIIFromFile(&model, &loader_error, file_name)) {
+            if (!loader_error.empty()) {
+                BOOST_THROW_EXCEPTION(error::file_exception()
+                    << error::errinfo_file_exception_file(file_name.c_str())
+                    << error::errinfo_file_exception_message(loader_error.c_str()));
+            }
+            else {
+                BOOST_THROW_EXCEPTION(error::file_exception()
+                    << error::errinfo_file_exception_file(file_name.c_str()));
+            }
+        }
+
+        glm::mat4 scene_transform(1.0f);
+        const tinygltf::Scene& scene(model.scenes.at(model.defaultScene));
+        for (int node_index : scene.nodes) {
+            const tinygltf::Node& scene_node(model.nodes.at(node_index));
+            load_gltf_node(model, scene_node, scene_transform);
+        }
+    }
+
+    void application::load_gltf_node(const tinygltf::Model& model, const tinygltf::Node& node, const glm::mat4& parent_transform)
+    {
+        draw_record node_draw;
+
+        if (node.matrix.size() == 16) {
+            for (int col = 0; col < 4; ++col) {
+                for (int row = 0; row < 4; ++row) {
+                    node_draw.transform[col][row] = static_cast<glm::mat4::value_type>(node.matrix[(col * 4) + row]);
+                }
+            }
+        }
+        else {
+            glm::vec3 node_translation(0.0f, 0.0f, 0.0f);
+            if (node.translation.size() == 3) {
+                for (int i = 0; i < 3; ++i) {
+                    node_translation[i] = static_cast<glm::vec3::value_type>(node.translation[i]);
+                }
+            }
+
+            glm::vec3 node_scale(1.0f, 1.0f, 1.0f);
+            if (node.scale.size() == 3) {
+                for (int i = 0; i < 3; ++i) {
+                    node_scale[i] = static_cast<glm::vec3::value_type>(node.scale[i]);
+                }
+            }
+
+            glm::quat node_rotation(0.0f, 0.0f, 0.0f, 1.0f);
+            if (node.rotation.size() == 4) {
+                for (int i = 0; i < 4; ++i) {
+                    node_rotation[i] = static_cast<glm::quat::value_type>(node.rotation[i]);
+                }
+            }
+
+            node_draw.transform =
+                glm::translate(node_translation) * // Translate to final position
+                glm::scale(node_scale) *
+                glm::mat4_cast(node_rotation);
+        }
+        node_draw.transform *= parent_transform;
+
+        const tinygltf::Mesh& mesh = model.meshes.at(node.mesh);
+        // TODO: Currently no support for multiple primitives per mesh.
+        const tinygltf::Primitive& primitive = mesh.primitives.at(0);
+
+        primitive;
+
+        //m_draws.push_back(node_draw);
+
+        for (int node_index : node.children) {
+            const tinygltf::Node& child_node(model.nodes.at(node_index));
+            load_gltf_node(model, child_node, node_draw.transform);
+        }
+    }
+
+    // static
+    bool application::gltf_load_image_data(
+        tinygltf::Image* /*image*/,
+        std::string* /*load_error*/,
+        int /*required_width*/,
+        int /*required_height*/,
+        const unsigned char* /*bytes*/,
+        int /*size*/,
+        void* user_data)
+    {
+        application* app = static_cast<application*>(user_data);
+        app;
+
+        return (true);
     }
 
     vk::CommandBuffer application::create_one_time_command_buffer()
@@ -1754,16 +1885,6 @@ namespace gtb {
             << error::errinfo_capability_description("Could not find needed memory type."));
     }
 
-    int application::run(int, char*[])
-    {
-        while (!glfwWindowShouldClose(m_window)) {
-            glfwPollEvents();
-            tick();
-            draw();
-        }
-        return (EXIT_SUCCESS);
-    }
-
     void application::tick()
     {
 
@@ -1825,17 +1946,12 @@ namespace gtb {
             command_buffer.bindIndexBuffer(m_static_geometry_buffers[d.ibo].buffer, zero_offset, vk::IndexType::eUint16, m_dispatch);
 
             // Fill out and bind dynamic state uniform buffer.
-            uint32_t dynamic_ubo_offsets[2];
+            uint32_t dynamic_ubo_offsets[1];
 
             // Update transform UBO field.
             *reinterpret_cast<glm::mat4*>(ubo_data + ubo_offset) = d.transform;
             dynamic_ubo_offsets[0] = ubo_offset;
             ubo_offset = align_up(ubo_offset + sizeof(glm::mat4), m_ubo_min_field_align);
-
-            // Update color UBO field.
-            *reinterpret_cast<glm::vec3*>(ubo_data + ubo_offset) = d.color;
-            dynamic_ubo_offsets[1] = ubo_offset;
-            ubo_offset = align_up(ubo_offset + sizeof(glm::vec3), m_ubo_min_field_align);
 
             command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, m_simple_pipeline_layout, 0, 1, &descriptor_set, _countof(dynamic_ubo_offsets), dynamic_ubo_offsets, m_dispatch);
 
