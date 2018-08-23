@@ -38,6 +38,7 @@
 #include <algorithm>
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include <fstream>
 #include <limits>
 
@@ -67,6 +68,7 @@
 #define GLM_FORCE_RADIANS
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/transform.hpp>
 
 // GLI
@@ -243,7 +245,9 @@ namespace gtb {
         } fields;
         uint32_t value;
 
-        value_2_10_10_10_snorm(float fb, float fg, float fr)
+        value_2_10_10_10_snorm() = default;
+
+        value_2_10_10_10_snorm(float fr, float fg, float fb)
         {
             fields.a = 0;
             fields.b = convert_float(fb);
@@ -251,10 +255,34 @@ namespace gtb {
             fields.r = convert_float(fr);
         }
 
-        value_2_10_10_10_snorm(uint32_t v)
+        explicit value_2_10_10_10_snorm(uint32_t v)
             : value(v)
         {}
 
+        explicit value_2_10_10_10_snorm(const glm::vec3& vector)
+        {
+            fields.a = 0;
+            fields.b = convert_float(vector.z);
+            fields.g = convert_float(vector.y);
+            fields.r = convert_float(vector.x);
+        }
+
+        value_2_10_10_10_snorm& operator =(uint32_t v)
+        {
+            value = v;
+            return (*this);
+        }
+
+        value_2_10_10_10_snorm& operator =(const glm::vec3& vector)
+        {
+            fields.a = 0;
+            fields.b = convert_float(vector.z);
+            fields.g = convert_float(vector.y);
+            fields.r = convert_float(vector.x);
+            return (*this);
+        }
+
+    private:
         static uint32_t convert_float(float v)
         {
             if (v >= 1.0f) {
@@ -278,9 +306,9 @@ namespace gtb {
     };
 
     struct vertex {
-        glm::f32vec3 position;
-        value_2_10_10_10_snorm tangent_space_basis; // x = normal, y = tangent, z = bitangent
-        glm::f32vec2 tex_coord;
+        glm::vec3 position;
+        glm::tvec3<value_2_10_10_10_snorm> tangent_space_basis; // x = normal, y = tangent, z = bitangent
+        glm::vec2 tex_coord;
     };
 
     class application {
@@ -302,6 +330,36 @@ namespace gtb {
             vk::ImageView view;
         };
         typedef std::vector<device_image> device_image_vector;
+
+        struct draw_record {
+            glm::mat4 transform;
+
+            uint32_t index_count;
+            uint32_t first_index;
+            int32_t vertex_offset;
+
+            vk::DescriptorSet immutable_state;
+
+            uint8_t vbo;
+            uint8_t ibo;
+        };
+        typedef std::vector<draw_record> draw_vector;
+
+        typedef std::unordered_map<uint32_t, uint8_t> loaded_buffer_map;
+
+        struct gltf_load_state {
+            explicit gltf_load_state(const tinygltf::Model& m)
+                : model(m)
+                , draw_index(0)
+            {}
+
+            const tinygltf::Model& model;
+            loaded_buffer_map loaded_ibo;
+            loaded_buffer_map loaded_vbo;
+            draw_vector draws;
+            std::vector<vk::DescriptorSet> simple_immutable_sets;
+            uint32_t draw_index;
+        };
 
         // Logging
         std::ofstream m_log_stream;
@@ -344,7 +402,7 @@ namespace gtb {
         std::vector<vk::CommandBuffer> m_command_buffers;
         std::vector<vk::Fence> m_command_fences;
 
-        // Sampler objects
+        // Samplers
         vk::Sampler m_bilinear_sampler;
 
         // Pipelines
@@ -364,27 +422,17 @@ namespace gtb {
         vk::DescriptorPool m_immutable_descriptor_pool;
         vk::DescriptorSetLayout m_simple_immutable_set_layout;
 
-        // Geometry objects
-        device_buffer_vector m_static_geometry_buffers;
+        // Static buffers
+        device_buffer_vector m_static_buffers;
 
-        // Texture objects
+        // Textures
         device_image_vector m_textures;
 
         // Draw list
-        struct draw_record {
-            glm::mat4 transform;
-
-            uint32_t index_count;
-            uint32_t first_index;
-            int32_t vertex_offset;
-
-            vk::DescriptorSet immutable_state;
-
-            uint8_t vbo;
-            uint8_t ibo;
-        };
-        typedef std::vector<draw_record> draw_vector;
         draw_vector m_draws;
+
+        // Camera
+        glm::mat4 m_camera_transform;
 
     public:
         static application* get();
@@ -461,8 +509,25 @@ namespace gtb {
         void builtin_object_init();
 
         // Loaded objects
-        void load_objects_init(const std::string& file_name);
-        void load_gltf_node(const tinygltf::Model& model, const tinygltf::Node& node, const glm::mat4& parent_transform); // Recursive!
+        void gltf_load(const std::string& file_name);
+        void gltf_load_node(
+            const tinygltf::Node& node,
+            const glm::mat4& parent_transform,
+            gltf_load_state& load_state); // Recursive!
+
+        void gltf_load_ibo(
+            draw_record& node_draw,
+            const tinygltf::Primitive& primitive,
+            gltf_load_state& load_state);
+
+        void gltf_load_vbo(
+            draw_record& node_draw,
+            const tinygltf::Primitive& primitive,
+            gltf_load_state& load_state);
+
+        void gltf_load_immutable_state(
+            const tinygltf::Node& node,
+            gltf_load_state& load_state); // Recursive!
 
         static bool gltf_load_image_data(
             tinygltf::Image* image,
@@ -473,17 +538,19 @@ namespace gtb {
             int size,
             void* user_data);
 
+        static uint32_t gltf_component_size(int component);
+
         // Command buffers
         vk::CommandBuffer create_one_time_command_buffer();
         void finish_one_time_command_buffer(vk::CommandBuffer cmd_buffer);
         void cleanup_one_time_command_buffer(vk::CommandBuffer cmd_buffer);
 
         // Buffers
-        device_buffer_vector::iterator create_static_geometry_buffer(
+        device_buffer_vector::iterator create_static_buffer(
             vk::BufferUsageFlags flags,
             const void* data,
             size_t sizeof_data);
-        void static_geometry_buffers_cleanup();
+        void static_buffers_cleanup();
 
         device_buffer create_device_buffer(
             vk::BufferUsageFlags flags,
@@ -524,6 +591,7 @@ namespace gtb {
         : m_window(nullptr)
         , m_queue_family_index(std::numeric_limits<uint32_t>::max())
         , m_ubo_min_field_align(0)
+        , m_camera_transform(1.0f)
     {
         std::fexcept_t fe;
         std::fesetexceptflag(&fe, 0);
@@ -565,7 +633,7 @@ namespace gtb {
 
         // geometry buffers and textures are either built-in or loaded.
         builtin_object_init();
-        load_objects_init(object_file);
+        gltf_load(object_file);
     }
 
     void application::cleanup()
@@ -575,7 +643,7 @@ namespace gtb {
         }
 
         textures_cleanup();
-        static_geometry_buffers_cleanup();
+        static_buffers_cleanup();
         pipeline_cleanup();
         per_frame_cleanup();
         sampler_cleanup();
@@ -1262,7 +1330,7 @@ namespace gtb {
 
         vertex_attrib_descriptions[1].location = 1;
         vertex_attrib_descriptions[1].binding = 0;
-        vertex_attrib_descriptions[1].format = vk::Format::eA2B10G10R10SnormPack32;
+        vertex_attrib_descriptions[1].format = vk::Format::eR32G32B32Uint;
         vertex_attrib_descriptions[1].offset = offsetof(gtb::vertex, tangent_space_basis);
 
         vertex_attrib_descriptions[2].location = 2;
@@ -1432,93 +1500,22 @@ namespace gtb {
     {
         // A Textured Quad (No quad primitive in Vulkan, so two tris and eat the helpers.)
         static const gtb::vertex quad_verts[] = {
-            { { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f } },
-            { { 0.0f, 1.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f } },
-            { { 1.0f, 1.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f } },
-            { { 1.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 0.0f } }
+            //  position                normal                tangent               bitangent               texcoord
+            { { 0.0f, 0.0f, 0.0f }, { { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f } }, { 0.0f, 0.0f } },
+            { { 0.0f, 1.0f, 0.0f }, { { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f } }, { 0.0f, 1.0f } },
+            { { 1.0f, 1.0f, 0.0f }, { { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f } }, { 1.0f, 1.0f } },
+            { { 1.0f, 0.0f, 0.0f }, { { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f } }, { 1.0f, 0.0f } }
         };
-        device_buffer_vector::iterator quad_vbo(create_static_geometry_buffer(
-            vk::BufferUsageFlagBits::eVertexBuffer,
-            quad_verts,
-            sizeof(quad_verts)));
-        uint8_t vbo_index = static_cast<uint8_t>(quad_vbo - m_static_geometry_buffers.begin());
+        create_static_buffer(vk::BufferUsageFlagBits::eVertexBuffer, quad_verts, sizeof(quad_verts));
 
         static const uint16_t quad_indices[] = {
             0, 1, 3,
             1, 2, 3
         };
-        device_buffer_vector::iterator quad_ibo(create_static_geometry_buffer(
-            vk::BufferUsageFlagBits::eIndexBuffer,
-            quad_indices,
-            sizeof(quad_indices)));
-        uint8_t ibo_index = static_cast<uint8_t>(quad_ibo - m_static_geometry_buffers.begin());
-
-        // Textures
-        create_texture("flowers1.dds");
-        create_texture("flowers2.dds");
-
-        // Now do per-draw setup
-        uint32_t draws = 2;
-        m_draws.reserve(draws);
-
-        // Immutable state needs a pool and one set per draw.
-        vk::DescriptorPoolSize descriptor_pool_sizes[1];
-
-        descriptor_pool_sizes[0].type = vk::DescriptorType::eCombinedImageSampler;
-        descriptor_pool_sizes[0].descriptorCount = 2 * 1;
-
-        vk::DescriptorPoolCreateInfo descriptor_pool_create_info;
-        descriptor_pool_create_info.maxSets = 2;
-        descriptor_pool_create_info.poolSizeCount = _countof(descriptor_pool_sizes);
-        descriptor_pool_create_info.pPoolSizes = descriptor_pool_sizes;
-
-        m_immutable_descriptor_pool = m_device.createDescriptorPool(descriptor_pool_create_info, nullptr, m_dispatch);
-
-        std::vector<vk::DescriptorSetLayout> replicated_set_layouts(draws, m_simple_immutable_set_layout);
-        vk::DescriptorSetAllocateInfo set_allocate_info;
-        set_allocate_info.descriptorPool = m_immutable_descriptor_pool;
-        set_allocate_info.descriptorSetCount = draws;
-        set_allocate_info.pSetLayouts = replicated_set_layouts.data();
-
-        std::vector<vk::DescriptorSet> simple_immutable_sets = m_device.allocateDescriptorSets(set_allocate_info, m_dispatch);
-
-        // Write all of the immutable state binding information into the sets.
-        vk::DescriptorImageInfo descriptor_image_info[2];
-        vk::WriteDescriptorSet write_descriptor_set[2];
-
-        descriptor_image_info[0].sampler = m_bilinear_sampler;
-        descriptor_image_info[0].imageView = m_textures[0].view;
-        descriptor_image_info[0].imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
-
-        write_descriptor_set[0].dstSet = simple_immutable_sets[0];
-        write_descriptor_set[0].dstBinding = 1;
-        write_descriptor_set[0].descriptorType = vk::DescriptorType::eCombinedImageSampler;
-        write_descriptor_set[0].descriptorCount = 1;
-        write_descriptor_set[0].pImageInfo = &descriptor_image_info[0];
-
-        descriptor_image_info[1].sampler = m_bilinear_sampler;
-        descriptor_image_info[1].imageView = m_textures[1].view;
-        descriptor_image_info[1].imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
-
-        write_descriptor_set[1].dstSet = simple_immutable_sets[1];
-        write_descriptor_set[1].dstBinding = 1;
-        write_descriptor_set[1].descriptorType = vk::DescriptorType::eCombinedImageSampler;
-        write_descriptor_set[1].descriptorCount = 1;
-        write_descriptor_set[1].pImageInfo = &descriptor_image_info[1];
-
-        m_device.updateDescriptorSets(_countof(write_descriptor_set), write_descriptor_set, 0, nullptr, m_dispatch);
-
-        // Draw list
-        // TODO: Temporary until we do model / scene loading.
-
-        glm::mat4 in_front_draw = glm::scale(glm::vec3(0.75f, 0.75f, 1.0f));
-        m_draws.push_back({ in_front_draw, 6, 0, 0, simple_immutable_sets[0], vbo_index, ibo_index });
-
-        glm::mat4 behind_draw = glm::translate(glm::vec3(-0.25f, -0.25f, 0.25f)) * glm::scale(glm::vec3(0.75f, 0.75f, 1.0f));
-        m_draws.push_back({ behind_draw, 6, 0, 0, simple_immutable_sets[1], vbo_index, ibo_index });
+        create_static_buffer(vk::BufferUsageFlagBits::eIndexBuffer, quad_indices, sizeof(quad_indices));
     }
 
-    void application::load_objects_init(const std::string& file_name)
+    void application::gltf_load(const std::string& file_name)
     {
         tinygltf::TinyGLTF loader;
         loader.SetImageLoader(gltf_load_image_data, this);
@@ -1538,22 +1535,58 @@ namespace gtb {
             }
         }
 
-        glm::mat4 scene_transform(1.0f);
+        // First pass over the model to load ibo /vbo as well as count draws.
         const tinygltf::Scene& scene(model.scenes.at(model.defaultScene));
+        glm::mat4 scene_transform(1.0f);
+        gltf_load_state load_state(model);
+
         for (int node_index : scene.nodes) {
             const tinygltf::Node& scene_node(model.nodes.at(node_index));
-            load_gltf_node(model, scene_node, scene_transform);
+            gltf_load_node(scene_node, scene_transform, load_state);
         }
+
+        uint32_t draw_count = static_cast<uint32_t>(load_state.draws.size());
+
+        // Immutable state needs a pool and one set per draw.
+        vk::DescriptorPoolSize descriptor_pool_sizes[1];
+        descriptor_pool_sizes[0].type = vk::DescriptorType::eCombinedImageSampler;
+        descriptor_pool_sizes[0].descriptorCount = draw_count; // Each draw needs a single sampler.
+
+        vk::DescriptorPoolCreateInfo descriptor_pool_create_info;
+        descriptor_pool_create_info.maxSets = draw_count;
+        descriptor_pool_create_info.poolSizeCount = _countof(descriptor_pool_sizes);
+        descriptor_pool_create_info.pPoolSizes = descriptor_pool_sizes;
+
+        m_immutable_descriptor_pool = m_device.createDescriptorPool(descriptor_pool_create_info, nullptr, m_dispatch);
+
+        std::vector<vk::DescriptorSetLayout> replicated_set_layouts(draw_count, m_simple_immutable_set_layout);
+        vk::DescriptorSetAllocateInfo set_allocate_info;
+        set_allocate_info.descriptorPool = m_immutable_descriptor_pool;
+        set_allocate_info.descriptorSetCount = draw_count;
+        set_allocate_info.pSetLayouts = replicated_set_layouts.data();
+
+        load_state.simple_immutable_sets = m_device.allocateDescriptorSets(set_allocate_info, m_dispatch);
+
+        // Second pass over the model to load textures and set up immutable descriptor sets.
+        for (int node_index : scene.nodes) {
+            const tinygltf::Node& scene_node(model.nodes.at(node_index));
+            gltf_load_immutable_state(scene_node, load_state);
+        }
+
+        // This might be an append later on.
+        m_draws = load_state.draws;
     }
 
-    void application::load_gltf_node(const tinygltf::Model& model, const tinygltf::Node& node, const glm::mat4& parent_transform)
+    void application::gltf_load_node(
+        const tinygltf::Node& node,
+        const glm::mat4& parent_transform,
+        gltf_load_state& load_state)
     {
-        draw_record node_draw;
-
+        glm::mat4 node_transform(1.0f);
         if (node.matrix.size() == 16) {
             for (int col = 0; col < 4; ++col) {
                 for (int row = 0; row < 4; ++row) {
-                    node_draw.transform[col][row] = static_cast<glm::mat4::value_type>(node.matrix[(col * 4) + row]);
+                    node_transform[col][row] = static_cast<glm::mat4::value_type>(node.matrix[(col * 4) + row]);
                 }
             }
         }
@@ -1572,31 +1605,235 @@ namespace gtb {
                 }
             }
 
-            glm::quat node_rotation(0.0f, 0.0f, 0.0f, 1.0f);
+            glm::quat node_rotation(1.0f, 0.0f, 0.0f, 0.0f); // constructor params are (w,x,y,z) not (x,y,z,w)!
             if (node.rotation.size() == 4) {
                 for (int i = 0; i < 4; ++i) {
                     node_rotation[i] = static_cast<glm::quat::value_type>(node.rotation[i]);
                 }
             }
 
-            node_draw.transform =
+            node_transform =
                 glm::translate(node_translation) * // Translate to final position
                 glm::scale(node_scale) *
                 glm::mat4_cast(node_rotation);
         }
-        node_draw.transform *= parent_transform;
+        node_transform *= parent_transform;
 
-        const tinygltf::Mesh& mesh = model.meshes.at(node.mesh);
-        // TODO: Currently no support for multiple primitives per mesh.
-        const tinygltf::Primitive& primitive = mesh.primitives.at(0);
+        if (node.mesh != -1) {
+            const tinygltf::Mesh& mesh = load_state.model.meshes.at(node.mesh);
+            for (const tinygltf::Primitive& primitive : mesh.primitives) {
+                draw_record node_draw;
+                node_draw.transform = node_transform;
 
-        primitive;
+                gltf_load_ibo(node_draw, primitive, load_state);
+                gltf_load_vbo(node_draw, primitive, load_state);
 
-        //m_draws.push_back(node_draw);
+                load_state.draws.push_back(node_draw);
+            }
+        }
+        if (node.camera != -1) {
+            glm::mat4 projection_transform(1.0f);
+
+            const tinygltf::Camera& camera = load_state.model.cameras.at(node.camera);
+            if (camera.type == "perspective") {
+                if (camera.perspective.zfar == 0.0f) {
+                    projection_transform = glm::infinitePerspectiveRH(
+                        camera.perspective.yfov,
+                        camera.perspective.aspectRatio,
+                        camera.perspective.znear);
+                }
+                else {
+                    projection_transform = glm::perspectiveRH(
+                        camera.perspective.yfov,
+                        camera.perspective.aspectRatio,
+                        camera.perspective.znear,
+                        camera.perspective.zfar);
+                }
+            }
+            else if (camera.type == "orthographic") {
+                projection_transform = glm::orthoRH(
+                    0.0f, 2.0f * camera.orthographic.xmag,
+                    0.0f, 2.0f * camera.orthographic.ymag,
+                    camera.orthographic.znear,
+                    camera.orthographic.zfar);
+            }
+
+            m_camera_transform = projection_transform * node_transform;
+        }
 
         for (int node_index : node.children) {
-            const tinygltf::Node& child_node(model.nodes.at(node_index));
-            load_gltf_node(model, child_node, node_draw.transform);
+            const tinygltf::Node& child_node(load_state.model.nodes.at(node_index));
+            gltf_load_node(child_node, node_transform, load_state);
+        }
+    }
+
+    void application::gltf_load_ibo(
+        draw_record& node_draw,
+        const tinygltf::Primitive& primitive,
+        gltf_load_state& load_state)
+    {
+        // Index buffer
+        const tinygltf::Accessor& index_accessor = load_state.model.accessors.at(primitive.indices);
+
+        loaded_buffer_map::iterator loaded_buffer(load_state.loaded_ibo.find(index_accessor.bufferView));
+        if (loaded_buffer != load_state.loaded_ibo.end()) {
+            node_draw.ibo = loaded_buffer->second;
+        }
+        else {
+            const tinygltf::BufferView& index_buffer_view = load_state.model.bufferViews.at(index_accessor.bufferView);
+            const tinygltf::Buffer& index_buffer = load_state.model.buffers.at(index_buffer_view.buffer);
+
+            device_buffer_vector::iterator device_buffer(create_static_buffer(
+                vk::BufferUsageFlagBits::eIndexBuffer,
+                index_buffer.data.data() + index_buffer_view.byteOffset,
+                index_buffer_view.byteLength));
+            uint8_t device_buffer_index = static_cast<uint8_t>(device_buffer - m_static_buffers.begin());
+
+            load_state.loaded_ibo.emplace(index_accessor.bufferView, device_buffer_index);
+            node_draw.ibo = device_buffer_index;
+        }
+
+        // Draw parameters also come from index information.
+        node_draw.first_index = static_cast<uint32_t>(index_accessor.byteOffset / gltf_component_size(index_accessor.componentType));
+        node_draw.index_count = static_cast<uint32_t>(index_accessor.count);
+        node_draw.vertex_offset = 0;
+    }
+
+    void application::gltf_load_vbo(
+        draw_record& node_draw,
+        const tinygltf::Primitive& primitive,
+        gltf_load_state& load_state)
+    {
+        const tinygltf::Accessor& index_accessor = load_state.model.accessors.at(primitive.indices);
+        uint32_t count = static_cast<uint32_t>(index_accessor.count);
+
+        std::vector<vertex> vbo_data;
+        vbo_data.reserve(count);
+
+        // gltf supports flexible attrib arrays that need to be packed into the vbo
+        uint32_t position_accessor_index = primitive.attributes.at("POSITION");
+        uint32_t normal_accessor_index = primitive.attributes.at("NORMAL");
+        uint32_t texcoord_accessor_index = primitive.attributes.at("TEXCOORD_0");
+        uint32_t tangent_accessor_index = primitive.attributes.at("TANGENT");
+
+        const tinygltf::Accessor& position_accessor = load_state.model.accessors.at(position_accessor_index);
+        const tinygltf::Accessor& normal_accessor = load_state.model.accessors.at(normal_accessor_index);
+        const tinygltf::Accessor& texcoord_accessor = load_state.model.accessors.at(texcoord_accessor_index);
+        const tinygltf::Accessor& tangent_accessor = load_state.model.accessors.at(tangent_accessor_index);
+
+        const tinygltf::BufferView& position_buffer_view = load_state.model.bufferViews.at(position_accessor.bufferView);
+        const tinygltf::BufferView& normal_buffer_view = load_state.model.bufferViews.at(normal_accessor.bufferView);
+        const tinygltf::BufferView& texcoord_buffer_view = load_state.model.bufferViews.at(texcoord_accessor.bufferView);
+        const tinygltf::BufferView& tangent_buffer_view = load_state.model.bufferViews.at(tangent_accessor.bufferView);
+
+        const tinygltf::Buffer& position_buffer = load_state.model.buffers.at(position_buffer_view.buffer);
+        const tinygltf::Buffer& normal_buffer = load_state.model.buffers.at(normal_buffer_view.buffer);
+        const tinygltf::Buffer& texcoord_buffer = load_state.model.buffers.at(texcoord_buffer_view.buffer);
+        const tinygltf::Buffer& tangent_buffer = load_state.model.buffers.at(tangent_buffer_view.buffer);
+
+        const unsigned char* position_base_pointer = position_buffer.data.data() + position_buffer_view.byteOffset + position_accessor.byteOffset;
+        const unsigned char* normal_base_pointer = normal_buffer.data.data() + normal_buffer_view.byteOffset + normal_accessor.byteOffset;
+        const unsigned char* tangent_base_pointer = tangent_buffer.data.data() + tangent_buffer_view.byteOffset + tangent_accessor.byteOffset;
+        const unsigned char* texcoord_base_pointer = texcoord_buffer.data.data() + texcoord_buffer_view.byteOffset + texcoord_accessor.byteOffset;
+
+        uint32_t position_stride = static_cast<uint32_t>((position_buffer_view.byteStride == 0) ? sizeof(glm::vec3) : position_buffer_view.byteStride);
+        uint32_t normal_stride = static_cast<uint32_t>((normal_buffer_view.byteStride == 0) ? sizeof(glm::vec3) : normal_buffer_view.byteStride);
+        uint32_t tangent_stride = static_cast<uint32_t>((tangent_buffer_view.byteStride == 0) ? sizeof(glm::vec4) : tangent_buffer_view.byteStride);
+
+        uint32_t texcoord_stride = 0;
+        if (texcoord_buffer_view.byteStride == 0) {
+            switch (texcoord_accessor.componentType) {
+            case TINYGLTF_COMPONENT_TYPE_FLOAT:
+                texcoord_stride = sizeof(float) * 2;
+                break;
+            case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
+                texcoord_stride = sizeof(unsigned char) * 2;
+                break;
+            case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT:
+                texcoord_stride = sizeof(unsigned short) * 2;
+                break;
+            }
+        }
+        else {
+            texcoord_stride = static_cast<uint32_t>(texcoord_buffer_view.byteStride);
+        }
+
+        for (uint32_t v = 0; v < count; ++v) {
+            vertex vert;
+
+            vert.position = *reinterpret_cast<const glm::vec3*>(position_base_pointer + (position_stride * v));
+            vert.tangent_space_basis.x = *reinterpret_cast<const glm::vec3*>(normal_base_pointer + (normal_stride * v));
+            vert.tangent_space_basis.y = (*reinterpret_cast<const glm::vec4*>(tangent_base_pointer + (tangent_stride * v))).xyz;
+            // TODO: Work out the rest of the tangent space basis
+
+            switch (texcoord_accessor.componentType) {
+            case TINYGLTF_COMPONENT_TYPE_FLOAT:
+                vert.tex_coord = *reinterpret_cast<const glm::vec2*>(texcoord_base_pointer + (texcoord_stride * v));
+                break;
+            case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
+                vert.tex_coord.x = static_cast<float>(*(texcoord_base_pointer + (texcoord_stride * v))) / 255.0f;
+                vert.tex_coord.y = static_cast<float>(*(texcoord_base_pointer + (texcoord_stride * v) + sizeof(unsigned char))) / 255.0f;
+                break;
+            case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT:
+                vert.tex_coord.x = static_cast<float>(*reinterpret_cast<const unsigned short*>(texcoord_base_pointer + (texcoord_stride * v))) / 65536.0f;
+                vert.tex_coord.y = static_cast<float>(*reinterpret_cast<const unsigned short*>(texcoord_base_pointer + (texcoord_stride * v) + sizeof(unsigned short))) / 65536.0f;
+                break;
+            }
+
+            vbo_data.push_back(vert);
+        }
+
+        device_buffer_vector::iterator device_buffer(create_static_buffer(
+            vk::BufferUsageFlagBits::eVertexBuffer,
+            vbo_data.data(),
+            vbo_data.size() * sizeof(vertex)));
+        uint8_t device_buffer_index = static_cast<uint8_t>(device_buffer - m_static_buffers.begin());
+
+        node_draw.vbo = device_buffer_index;
+    }
+
+    void application::gltf_load_immutable_state(
+        const tinygltf::Node& node,
+        gltf_load_state& load_state)
+    {
+        if (node.mesh == -1) {
+            return;
+        }
+
+        const tinygltf::Mesh& mesh = load_state.model.meshes.at(node.mesh);
+        for (const tinygltf::Primitive& primitive : mesh.primitives) {
+            const tinygltf::Material& material = load_state.model.materials.at(primitive.material);
+
+            int color_texture_index = material.values.at("baseColorTexture").TextureIndex();
+            const tinygltf::Texture& color_texture = load_state.model.textures.at(color_texture_index);
+            const tinygltf::Image& color_texture_image = load_state.model.images.at(color_texture.source);
+
+            device_image_vector::iterator texture_image(create_texture(color_texture_image.uri));
+
+            // Write the immutable state binding information into the set for this draw.
+            vk::DescriptorSet immutable_state_set = load_state.simple_immutable_sets[load_state.draw_index];
+            vk::DescriptorImageInfo descriptor_image_info[1];
+            vk::WriteDescriptorSet write_descriptor_set[1];
+
+            descriptor_image_info[0].sampler = m_bilinear_sampler;
+            descriptor_image_info[0].imageView = texture_image->view;
+            descriptor_image_info[0].imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+
+            write_descriptor_set[0].dstSet = immutable_state_set;
+            write_descriptor_set[0].dstBinding = 1;
+            write_descriptor_set[0].descriptorType = vk::DescriptorType::eCombinedImageSampler;
+            write_descriptor_set[0].descriptorCount = 1;
+            write_descriptor_set[0].pImageInfo = &descriptor_image_info[0];
+
+            m_device.updateDescriptorSets(_countof(write_descriptor_set), write_descriptor_set, 0, nullptr, m_dispatch);
+
+            load_state.draws.at(load_state.draw_index).immutable_state = immutable_state_set;
+            load_state.draw_index++;
+        }
+
+        for (int node_index : node.children) {
+            const tinygltf::Node& child_node(load_state.model.nodes.at(node_index));
+            gltf_load_immutable_state(child_node, load_state);
         }
     }
 
@@ -1614,6 +1851,26 @@ namespace gtb {
         app;
 
         return (true);
+    }
+
+    // static
+    uint32_t application::gltf_component_size(int component)
+    {
+        switch (component) {
+        case TINYGLTF_COMPONENT_TYPE_BYTE:
+        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
+            return (1);
+        case TINYGLTF_COMPONENT_TYPE_SHORT:
+        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT:
+            return (2);
+        case TINYGLTF_COMPONENT_TYPE_INT:
+        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT:
+        case TINYGLTF_COMPONENT_TYPE_FLOAT:
+            return (4);
+        case TINYGLTF_COMPONENT_TYPE_DOUBLE:
+            return (8);
+        }
+        return (0);
     }
 
     vk::CommandBuffer application::create_one_time_command_buffer()
@@ -1650,7 +1907,7 @@ namespace gtb {
         m_device.freeCommandBuffers(m_command_pool, cmd_buffer, m_dispatch);
     }
 
-    application::device_buffer_vector::iterator application::create_static_geometry_buffer(
+    application::device_buffer_vector::iterator application::create_static_buffer(
         vk::BufferUsageFlags flags,
         const void* data,
         size_t sizeof_data)
@@ -1681,12 +1938,12 @@ namespace gtb {
         cleanup_one_time_command_buffer(copy_command_buffer);
         cleanup_device_buffer(staging_buffer);
 
-        return (m_static_geometry_buffers.emplace(m_static_geometry_buffers.end(), optimized_buffer));
+        return (m_static_buffers.emplace(m_static_buffers.end(), optimized_buffer));
     }
 
-    void application::static_geometry_buffers_cleanup()
+    void application::static_buffers_cleanup()
     {
-        for (device_buffer& b : m_static_geometry_buffers) {
+        for (device_buffer& b : m_static_buffers) {
             cleanup_device_buffer(b);
         }
     }
@@ -1942,17 +2199,18 @@ namespace gtb {
         for (draw_record& d : m_draws) {
             // Bind geometry
             vk::DeviceSize zero_offset = 0;
-            command_buffer.bindVertexBuffers(0, m_static_geometry_buffers[d.vbo].buffer, zero_offset, m_dispatch);
-            command_buffer.bindIndexBuffer(m_static_geometry_buffers[d.ibo].buffer, zero_offset, vk::IndexType::eUint16, m_dispatch);
+            command_buffer.bindVertexBuffers(0, m_static_buffers[d.vbo].buffer, zero_offset, m_dispatch);
+            command_buffer.bindIndexBuffer(m_static_buffers[d.ibo].buffer, zero_offset, vk::IndexType::eUint16, m_dispatch);
 
             // Fill out and bind dynamic state uniform buffer.
             uint32_t dynamic_ubo_offsets[1];
 
             // Update transform UBO field.
-            *reinterpret_cast<glm::mat4*>(ubo_data + ubo_offset) = d.transform;
+            *reinterpret_cast<glm::mat4*>(ubo_data + ubo_offset) = m_camera_transform * d.transform;
             dynamic_ubo_offsets[0] = ubo_offset;
             ubo_offset = align_up(ubo_offset + sizeof(glm::mat4), m_ubo_min_field_align);
 
+            // TODO: Collapse this into a single bind call.
             command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, m_simple_pipeline_layout, 0, 1, &descriptor_set, _countof(dynamic_ubo_offsets), dynamic_ubo_offsets, m_dispatch);
 
             // Bind the immutable state.
