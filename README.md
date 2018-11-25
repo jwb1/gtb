@@ -16,6 +16,4 @@ How to Build
 
 How to Run
 ----------
-gtb.exe <gltf file name>
-
-
+gtb.exe &lt;gltf file name&gt;
