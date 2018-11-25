@@ -1,0 +1,9 @@
+For building glfw:
+cmake -G "Visual Studio 15 2017 Win64"
+cmake --build . --config Debug
+cmake --build . --config Release
+
+For building boost:
+bootstrap
+b2 --with-filesystem --with-exception --toolset=msvc variant=debug link=static threading=multi runtime-link=shared address-model=64
+b2 --with-filesystem --with-exception --toolset=msvc variant=release link=static threading=multi runtime-link=shared address-model=64

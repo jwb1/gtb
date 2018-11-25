@@ -56,6 +56,7 @@
 
 #if defined(_MSC_VER)
 #pragma warning (push)
+#pragma warning (disable : 4127) // conditional expression is constant
 #pragma warning (disable : 4201) // nonstandard extension used : nameless struct / union
 #pragma warning (disable : 4458) // declaration hides class member
 #pragma warning (disable : 4701) // potentially uninitialized local variable used
@@ -68,6 +69,7 @@
 #define GLM_FORCE_RADIANS
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
+#include <glm/gtc/type_precision.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/transform.hpp>
 
@@ -532,6 +534,7 @@ namespace gtb {
         static bool gltf_load_image_data(
             tinygltf::Image* image,
             std::string* load_error,
+            std::string* load_warn,
             int required_width,
             int required_height,
             const unsigned char* bytes,
@@ -1522,8 +1525,9 @@ namespace gtb {
 
         tinygltf::Model model;
         std::string loader_error;
+        std::string loader_warning;
 
-        if (!loader.LoadASCIIFromFile(&model, &loader_error, file_name)) {
+        if (!loader.LoadASCIIFromFile(&model, &loader_error, &loader_warning, file_name)) {
             if (!loader_error.empty()) {
                 BOOST_THROW_EXCEPTION(error::file_exception()
                     << error::errinfo_file_exception_file(file_name.c_str())
@@ -1841,6 +1845,7 @@ namespace gtb {
     bool application::gltf_load_image_data(
         tinygltf::Image* /*image*/,
         std::string* /*load_error*/,
+        std::string* /*load_warn*/,
         int /*required_width*/,
         int /*required_height*/,
         const unsigned char* /*bytes*/,
